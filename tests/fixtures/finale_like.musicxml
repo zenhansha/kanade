@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 3.1 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<!-- Finale 27 の書き出しに似せたテスト用ファイル（弱起・2段譜・声部・連符・装飾音・移調楽器） -->
+<score-partwise version="3.1">
+  <movement-title>Test Sonatine</movement-title>
+  <identification>
+    <creator type="composer">K. Tester</creator>
+    <encoding><software>Finale v27.4 for Windows</software><encoding-date>2024-05-01</encoding-date></encoding>
+  </identification>
+  <credit page="1"><credit-type>title</credit-type><credit-words font-size="24" justify="center">Test Sonatine</credit-words></credit>
+  <part-list>
+    <score-part id="P1"><part-name>Clarinet in B&#x266d;</part-name><part-abbreviation>Cl.</part-abbreviation>
+      <score-instrument id="P1-I1"><instrument-name>Clarinet</instrument-name></score-instrument>
+      <midi-instrument id="P1-I1"><midi-channel>1</midi-channel><midi-program>72</midi-program></midi-instrument></score-part>
+    <score-part id="P2"><part-name>Piano</part-name>
+      <midi-instrument id="P2-I1"><midi-channel>2</midi-channel><midi-program>1</midi-program></midi-instrument></score-part>
+  </part-list>
+  <part id="P1">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>2</divisions><key><fifths>1</fifths><mode>major</mode></key><time><beats>3</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef>
+        <transpose><diatonic>-1</diatonic><chromatic>-2</chromatic></transpose></attributes>
+      <direction placement="above"><direction-type><words font-weight="bold">Allegro</words></direction-type><direction-type><metronome><beat-unit>quarter</beat-unit><per-minute>132</per-minute></metronome></direction-type><sound tempo="132"/></direction>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type><stem>down</stem></note>
+    </measure>
+    <measure number="1">
+      <note><grace slash="yes"/><pitch><step>F</step><alter>1</alter><octave>5</octave></pitch><voice>1</voice><type>eighth</type></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>3</duration><tie type="start"/><voice>1</voice><type>quarter</type><dot/><notations><tied type="start"/></notations></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration><tie type="stop"/><voice>1</voice><type>eighth</type><notations><tied type="stop"/></notations></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>quarter</type></note>
+    </measure>
+    <measure number="2">
+      <note><rest measure="yes"/><duration>6</duration><voice>1</voice></note>
+      <barline location="right"><bar-style>light-heavy</bar-style></barline>
+    </measure>
+  </part>
+  <part id="P2">
+    <measure number="0" implicit="yes">
+      <attributes><divisions>6</divisions><key><fifths>-1</fifths></key><time><beats>3</beats><beat-type>4</beat-type></time><staves>2</staves>
+        <clef number="1"><sign>G</sign><line>2</line></clef><clef number="2"><sign>F</sign><line>4</line></clef></attributes>
+      <note><rest/><duration>6</duration><voice>1</voice><type>quarter</type><staff>1</staff></note>
+      <backup><duration>6</duration></backup>
+      <note><rest/><duration>6</duration><voice>5</voice><type>quarter</type><staff>2</staff></note>
+    </measure>
+    <measure number="1">
+      <note><pitch><step>C</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type><time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification><staff>1</staff><beam number="1">begin</beam><notations><tuplet type="start" bracket="no"/></notations></note>
+      <note><pitch><step>D</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type><time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification><staff>1</staff><beam number="1">continue</beam></note>
+      <note><pitch><step>E</step><octave>5</octave></pitch><duration>2</duration><voice>1</voice><type>eighth</type><time-modification><actual-notes>3</actual-notes><normal-notes>2</normal-notes></time-modification><staff>1</staff><beam number="1">end</beam><notations><tuplet type="stop"/></notations></note>
+      <note><pitch><step>F</step><octave>5</octave></pitch><duration>12</duration><voice>1</voice><type>half</type><staff>1</staff></note>
+      <backup><duration>18</duration></backup>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>12</duration><voice>2</voice><type>half</type><staff>1</staff></note>
+      <note><pitch><step>B</step><alter>-1</alter><octave>4</octave></pitch><duration>6</duration><voice>2</voice><type>quarter</type><staff>1</staff></note>
+      <backup><duration>18</duration></backup>
+      <note><pitch><step>F</step><octave>3</octave></pitch><duration>18</duration><voice>5</voice><type>half</type><dot/><staff>2</staff></note>
+      <note><chord/><pitch><step>C</step><octave>4</octave></pitch><duration>18</duration><voice>5</voice><type>half</type><dot/><staff>2</staff></note>
+    </measure>
+    <measure number="2">
+      <attributes><clef number="2"><sign>G</sign><line>2</line></clef></attributes>
+      <note><rest measure="yes"/><duration>18</duration><voice>1</voice><staff>1</staff></note>
+      <backup><duration>18</duration></backup>
+      <note><pitch><step>A</step><octave>4</octave></pitch><duration>18</duration><voice>5</voice><type>half</type><dot/><staff>2</staff></note>
+      <barline location="right"><bar-style>light-heavy</bar-style></barline>
+    </measure>
+  </part>
+</score-partwise>
