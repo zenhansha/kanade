@@ -4,6 +4,7 @@ import * as E from '../js/core/edit.js';
 import { TPQ, spellMidi, splitSpan, pitchName, midiOf } from '../js/core/music.js';
 import { exportMusicXML, importMusicXML } from '../js/io/musicxml.js';
 import { layoutScore } from '../js/engrave/layout.js';
+import { serializeKanade, parseKanade } from '../js/io/kanade.js';
 
 let pass = 0, fail = 0;
 const tests = [];
@@ -261,6 +262,24 @@ test('.mxl（圧縮 MusicXML）を開ける', async () => {
   const back = importMusicXML(await readMxl(zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.length)));
   eq(back.meta.title, 'MXL');
 });
+test('.kanade 保存 → 読み込みで何も失われない（改段・ページ設定・連符も）', () => {
+  const s = createScore({ insts: ['piano', 'flute'], measures: 6, title: 'カナデ', composer: 'テスト' });
+  E.enterNote(s, { p: 0, s: 0, m: 0, v: 0, t: 0 }, { type: 'quarter', dots: 1, pitches: [C4, E4] });
+  E.makeTuplet(s, { p: 1, s: 0, m: 1, v: 0, t: 0 }, 3, 'eighth');
+  s.measures[2].sysBreak = true;
+  s.settings.staffMm = 6.2;
+  const back = parseKanade(serializeKanade(s));
+  eq(back, s);
+});
+
+test('.kanade でないファイルや新しすぎる版は分かりやすく断る', () => {
+  const msg = (t) => { try { parseKanade(t); return 'ok'; } catch (e) { return e.message; } };
+  eq(msg('<score-partwise/>'), 'KANADE のファイルではないようです');
+  eq(msg('{"format":"other"}'), 'KANADE のファイルではないようです');
+  eq(msg('{"format":"kanade","version":1,"score":{"parts":[],"measures":[]}}'), '楽譜データが壊れています');
+  eq(/新しい版/.test(msg('{"format":"kanade","version":99,"score":{}}')), true);
+});
+
 function makeZip(files, zlib) {
   const locals = [], centrals = [];
   let off = 0;

@@ -7,6 +7,7 @@ export function bindKeys(app) {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     if (document.querySelector('#modalRoot .backdrop')) { if (e.key === 'Escape') app.dialogs.close(); return; }
+    if (app.dialogs.menuEl && e.key === 'Escape') { e.preventDefault(); return app.dialogs.closeMenu(); }
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key;
     const code = e.code;
@@ -20,8 +21,10 @@ export function bindKeys(app) {
       if (lk === 'x') { handled(); return app.copy(true); }
       if (lk === 'v') { handled(); return app.paste(); }
       if (lk === 'a') { handled(); return app.selectAll(); }
-      if (lk === 's') { handled(); app.save(); return app.toast('保存しました'); }
+      // PC は .kanade ファイルへ保存（iPad は端末内）。Shift 付きは「名前を付けて保存」
+      if (lk === 's') { handled(); return app.saveToFile(e.shiftKey); }
       if (lk === 'o') { handled(); return app.dialogs.openList(); }
+      // ブラウザのタブでは Ctrl+N は「新しいウィンドウ」に取られるので Alt+N も用意（下）
       if (lk === 'n') { handled(); return app.dialogs.newScore(); }
       if (lk === 'p') { handled(); return app.print(); }
       if (lk === 'e') { handled(); return app.exportXML(); }
@@ -32,9 +35,11 @@ export function bindKeys(app) {
       if (k === 'ArrowRight' || k === 'ArrowLeft') { handled(); return app.moveCaret(k === 'ArrowRight' ? 1 : -1); }
       if (k === '=' || k === '+' || k === ';') { handled(); return app.view.setZoom(app.view.zoom * 1.15); }
       if (k === '-') { handled(); return app.view.setZoom(app.view.zoom / 1.15); }
-      if (k === '0') { handled(); return app.view.setZoom(app.view.fitZoom()); }
+      if (k === '0') { handled(); return app.zoomToFit(); }
       return;
     }
+    if (e.altKey && code === 'KeyN') { handled(); return app.dialogs.newScore(); }
+    if (k === 'F1') { handled(); return app.dialogs.help(); }
     if (e.altKey && /^Digit[1-4]$/.test(code)) { handled(); return app.setVoice(+code.slice(5) - 1); }
     if (e.altKey && (k === 'ArrowUp' || k === 'ArrowDown')) { handled(); return app.shiftPitch('step', k === 'ArrowUp' ? 1 : -1); }
 

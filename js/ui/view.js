@@ -6,6 +6,7 @@ import { fromDiatonic, keyAlter } from '../core/music.js';
 
 const G = SMUFL.glyphs;
 const MM_PX = 96 / 25.4;
+const PAGE_GAP = 28; // ページどうしの間隔（css の #pages の gap と同じ）
 
 export class ScoreView {
   constructor(app, scroller, pagesEl) {
@@ -13,6 +14,7 @@ export class ScoreView {
     this.scroller = scroller;
     this.pagesEl = pagesEl;
     this.zoom = 1;
+    this.fit = true; // 「画面に合わせる」状態か（ズームを手で変えたら false）
     this.L = null;
     this.wraps = [];
     this.ov = {};
@@ -21,16 +23,37 @@ export class ScoreView {
 
   get spPx() { return (this.app.score.settings.staffMm / 4) * MM_PX * this.zoom; }
 
+  // 画面に合わせた倍率。基本はページの幅に合わせるが、PC の横長の大きな画面では
+  // 1ページだけだと大きすぎるので、100% 以上を保てる範囲でページを横に並べる（見開き表示）
   fitZoom() {
     const s = this.app.score.settings;
     const pagePx = s.page.w * MM_PX;
     const avail = this.scroller.clientWidth - 72; // 左右の余白＋縦スクロールバーぶん
-    return Math.max(0.4, Math.min(3, avail / pagePx));
+    let z = avail / pagePx;
+    for (let n = 2; n <= 4; n++) {
+      const zn = (avail - PAGE_GAP * (n - 1)) / (n * pagePx);
+      if (zn < 1) break;
+      z = zn;
+    }
+    return Math.max(0.4, Math.min(3, z));
+  }
+  // 「画面に合わせる」に戻す
+  resetZoom() { this.fit = true; this.zoom = this.fitZoom(); }
+  // ウィンドウの大きさが変わったとき（PC ではよくある）。合わせた状態なら倍率も合わせ直す
+  onResize() {
+    if (!this.L) return;
+    if (!this.fit) return this.rescale();
+    const sc = this.scroller;
+    const frac = sc.scrollHeight > 0 ? sc.scrollTop / sc.scrollHeight : 0;
+    this.zoom = this.fitZoom();
+    this.rescale();
+    sc.scrollTop = frac * sc.scrollHeight;
   }
 
   render(L) {
     this.L = L;
     const spPx = this.spPx;
+    this.pagesEl.style.setProperty('--pw', L.pageW * spPx + 'px');
     while (this.wraps.length > L.pages.length) this.wraps.pop().remove();
     L.pages.forEach((pg, i) => {
       let w = this.wraps[i];
@@ -46,11 +69,13 @@ export class ScoreView {
       w.innerHTML = `<svg class="page" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${pg.w} ${pg.h}" data-page="${i}">${pg.svg}</svg>`;
     });
     this.ov = {};
+    this.hoverId = null;
   }
 
   rescale() {
     if (!this.L) return;
     const spPx = this.spPx;
+    this.pagesEl.style.setProperty('--pw', this.L.pageW * spPx + 'px');
     this.L.pages.forEach((pg, i) => {
       const w = this.wraps[i];
       w.style.width = pg.w * spPx + 'px';
@@ -227,6 +252,13 @@ export class ScoreView {
     return { page: sy.page, x, y: sy.staffYs[0] };
   }
 
+  // マウスを乗せた音符をうっすら色付け（PC 用。クリックで選べることが分かるように）
+  hover(id) {
+    if (id === this.hoverId) return;
+    this.hoverId = id;
+    this.highlight(id ? [id] : [], 'hov');
+  }
+
   highlight(ids, cls = 'sel') {
     this.pagesEl.querySelectorAll('.' + cls).forEach(e => e.classList.remove(cls));
     for (const id of ids) this.pagesEl.querySelectorAll(`[data-id="${id}"]`).forEach(e => e.classList.add(cls));
@@ -277,6 +309,7 @@ export class ScoreView {
 
   setZoom(z, anchor = null) {
     const old = this.zoom;
+    this.fit = false;
     this.zoom = Math.max(0.4, Math.min(3, z));
     const sc = this.scroller;
     const a = anchor || { cx: sc.clientWidth / 2, cy: sc.clientHeight / 2, sl: sc.scrollLeft, st: sc.scrollTop };

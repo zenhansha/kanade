@@ -2,7 +2,7 @@
 import { INSTRUMENTS, INST, TEMPLATES, createScore, createPart, fillMeasures, measureAttrs } from '../core/score.js';
 import * as E from '../core/edit.js';
 import { keyNameJa, CLEFS, TPQ, TYPE_TICKS } from '../core/music.js';
-import { storage } from '../io/storage.js';
+import { storage, canPickFiles } from '../io/storage.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const TIMES = [[4, 4], [3, 4], [2, 4], [2, 2], [6, 8], [9, 8], [12, 8], [3, 8], [5, 4], [7, 8]];
@@ -36,11 +36,20 @@ export class Dialogs {
     m.className = 'menu';
     m.innerHTML = items.map((it, i) => it === '-' ? '<hr>' : it.head ? `<div class="mh">${it.head}</div>` : `<button data-i="${i}">${it.label}${it.kbd ? `<kbd>${it.kbd}</kbd>` : ''}</button>`).join('');
     document.body.appendChild(m);
-    const r = anchor.getBoundingClientRect();
-    const mw = m.offsetWidth;
+    // anchor はボタン（その下に開く）か {x, y}（右クリックした位置に開く）。下に入らなければ上に開く
+    const isEl = !!anchor.getBoundingClientRect;
+    const r = isEl ? anchor.getBoundingClientRect() : { left: anchor.x, top: anchor.y, bottom: anchor.y };
+    const gap = isEl ? 6 : 2;
+    const mw = m.offsetWidth, mh = m.offsetHeight;
     m.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.left)) + 'px';
-    m.style.top = r.bottom + 6 + 'px';
-    m.style.maxHeight = window.innerHeight - r.bottom - 20 + 'px';
+    const below = window.innerHeight - r.bottom - gap - 8, above = r.top - gap - 8;
+    if (mh > below && above > below) {
+      m.style.top = Math.max(8, r.top - gap - mh) + 'px';
+      m.style.maxHeight = above + 'px';
+    } else {
+      m.style.top = r.bottom + gap + 'px';
+      m.style.maxHeight = below + 'px';
+    }
     m.style.overflow = 'auto';
     m.onclick = (e) => { const b = e.target.closest('[data-i]'); if (!b) return; this.closeMenu(); items[+b.dataset.i].run(); };
     setTimeout(() => { this.outside = (e) => { if (!m.contains(e.target)) this.closeMenu(); }; window.addEventListener('pointerdown', this.outside, true); });
@@ -55,14 +64,21 @@ export class Dialogs {
   fileMenu(anchor) {
     const a = this.app;
     this.menu(anchor, [
-      { label: '新規作成…', kbd: 'Ctrl+N', run: () => this.newScore() },
-      { label: '開く…（この端末の楽譜）', kbd: 'Ctrl+O', run: () => this.openList() },
+      { label: '新規作成…', kbd: 'Alt+N', run: () => this.newScore() },
+      { label: '開く…', kbd: 'Ctrl+O', run: () => this.openList() },
+      ...(canPickFiles ? [
+        { label: '保存' + (a.fileName ? `（${esc(a.fileName)}）` : '…'), kbd: 'Ctrl+S', run: () => a.saveToFile() },
+        { label: '名前を付けて保存…', kbd: 'Ctrl+Shift+S', run: () => a.saveToFile(true) },
+      ] : [
+        { label: '.kanade ファイルに書き出す（PC へ渡す）', kbd: 'Ctrl+Shift+S', run: () => a.saveToFile(true) },
+      ]),
       { label: '複製を作る', run: () => this.duplicate() },
       '-',
-      { label: 'MusicXML を読み込む…（Finale から）', run: () => document.getElementById('fileInput').click() },
+      { label: 'MusicXML を読み込む…（Finale から）', run: () => a.openFileDialog() },
       { label: 'MusicXML に書き出す', kbd: 'Ctrl+E', run: () => a.exportXML() },
       { label: '印刷 / PDF に保存', kbd: 'Ctrl+P', run: () => a.print() },
       '-',
+      ...(a.isInstalled ? [] : [{ label: 'アプリとしてインストール…', run: () => a.install() }]),
       { label: (a.state.colorVoices ? '✓ ' : '') + '声部を色分けして表示', run: () => { a.state.colorVoices = !a.state.colorVoices; document.body.classList.toggle('color-voices', a.state.colorVoices); } },
       { label: (a.synth.useSamples ? '✓ ' : '') + '高音質音源を使う（ネット接続時）', run: () => { a.synth.useSamples = !a.synth.useSamples; a.toast(a.synth.useSamples ? '高音質音源：オン' : '内蔵シンセで再生します'); } },
       { label: '使い方・ショートカット', kbd: '?', run: () => this.help() },
@@ -71,11 +87,15 @@ export class Dialogs {
 
   async openList() {
     const docs = await storage.list();
-    const body = docs.length ? `<div class="doclist">${docs.map(d => `<div class="doc" data-id="${d.id}"><span class="nm">${esc(d.title)}</span><span class="dt">${new Date(d.updated).toLocaleString('ja-JP')}</span><button data-del="${d.id}" title="削除">削除</button></div>`).join('')}</div>` : '<p>まだ保存された楽譜はありません。</p>';
+    const top = `<div class="openfile"><button class="btn primary" id="olFile">${canPickFiles ? 'PC のファイルを開く…' : '「ファイル」から開く…'}</button>
+      <span>.kanade・MusicXML（.musicxml / .xml / .mxl）${canPickFiles ? '。ウィンドウにドラッグ＆ドロップでも開けます' : ''}</span></div>
+      <div class="mh2">最近の楽譜（この端末に自動保存）</div>`;
+    const body = top + (docs.length ? `<div class="doclist">${docs.map(d => `<div class="doc" data-id="${d.id}"><span class="nm">${esc(d.title)}${d.fileName ? `<small>${esc(d.fileName)}</small>` : ''}</span><span class="dt">${new Date(d.updated).toLocaleString('ja-JP')}</span><button data-del="${d.id}" title="削除">削除</button></div>`).join('')}</div>` : '<p>まだ保存された楽譜はありません。</p>');
     this.open({
-      title: 'この端末の楽譜', body,
+      title: '開く', body,
       buttons: [{ label: '閉じる' }],
       onOpen: (bd) => {
+        bd.querySelector('#olFile').onclick = () => { this.close(); this.app.openFileDialog(); };
         bd.querySelectorAll('.doc').forEach(el => el.addEventListener('click', async (e) => {
           const del = e.target.closest('[data-del]');
           if (del) {
@@ -88,7 +108,7 @@ export class Dialogs {
           }
           await this.app.save();
           const doc = await storage.get(el.dataset.id);
-          if (doc) { this.app.openDoc(doc); this.app.view.zoom = this.app.view.fitZoom(); this.app.relayout(); this.app.view.scroller.scrollTo({ top: 0 }); }
+          if (doc) { this.app.openDoc(doc); this.app.view.resetZoom(); this.app.relayout(); this.app.view.scroller.scrollTo({ top: 0 }); }
           this.close();
         }));
       },
@@ -150,7 +170,7 @@ export class Dialogs {
           });
           if (!first) this.app.save();
           this.app.newDoc(score);
-          this.app.view.zoom = this.app.view.fitZoom();
+          this.app.view.resetZoom();
           this.app.state.mode = 'input';
           this.app.relayout();
           this.app.view.scroller.scrollTo({ top: 0 });
@@ -382,7 +402,7 @@ export class Dialogs {
           fillMeasures(sc);
         });
         a.state.sel = null; a.state.caret = { p: 0, s: 0, m: 0, v: 0, t: 0 };
-        a.view.zoom = a.view.fitZoom(); a.relayout();
+        a.view.resetZoom(); a.relayout();
       } }],
     });
     const render = () => {
@@ -412,7 +432,7 @@ export class Dialogs {
         const h = Math.max(4, Math.min(12, +bd.querySelector('#psH').value || 7));
         const [w, hh] = bd.querySelector('#psP').value.split('x').map(Number);
         a.edit('ページ設定', () => { s.staffMm = h; s.page = { w, h: hh }; });
-        a.view.zoom = a.view.fitZoom(); a.relayout();
+        a.view.resetZoom(); a.relayout();
       } }],
     });
   }
@@ -436,6 +456,24 @@ export class Dialogs {
     this.open({ title: 'MIDI キーボード', body, narrow: true, buttons: [...(a.midi.supported && !st.ok ? [{ label: '再接続', onClick: () => { a.midi.connect(); } }] : []), { label: '閉じる', cls: 'primary' }] });
   }
 
+  // ── アプリとしてインストール（ブラウザがインストール画面を出せないときの案内） ──
+  installHelp() {
+    this.open({
+      title: 'アプリとしてインストール', narrow: true,
+      body: `<div class="help">
+        <p>インストールすると、ブラウザの枠なしの専用ウィンドウで開き、スタートメニューやタスクバーから起動できます。ネットがなくても動きます。</p>
+        <h3>PC（Edge・Chrome）</h3>
+        <p>アドレスバーの右端にある <b>インストール</b> のアイコン（□に↓、または「アプリを利用できます」）を押します。<br>
+        見当たらないときは、ブラウザの「…」メニュー →「アプリ」→「このサイトをアプリとしてインストール」。</p>
+        <p>インストールしたアプリでは、<b>.kanade / .musicxml / .mxl</b> を右クリック →「プログラムから開く」で KANADE を選べます。</p>
+        <h3>iPad（Safari）</h3>
+        <p>共有ボタン（□↑）→「ホーム画面に追加」。</p>
+        <p style="font-size:13px;color:var(--muted)">※ Firefox はアプリのインストールに対応していません（普通に使うのは問題ありません）。</p>
+      </div>`,
+      buttons: [{ label: '閉じる', cls: 'primary' }],
+    });
+  }
+
   // ── ヘルプ ──
   help() {
     const k = (s) => s.split(' ').map(x => `<kbd>${x}</kbd>`).join(' ');
@@ -450,6 +488,10 @@ export class Dialogs {
         <h3>直す（選択モード）</h3>
         <p>・音符をタップで選択 → 上下ドラッグ（ペン/マウス）や ↑↓ キーで音高、パレットの音価で長さ、♯♭で臨時記号、削除で休符に。<br>
         ・小節の空いている所をタップで小節を選択。続けて別の小節をタップすると範囲選択（Shift+クリックでも可）。コピー・貼り付け・移調（↑↓）・削除ができます。</p>
+        <h3>PC（マウス）で使うとき</h3>
+        <p>・<b>ドラッグ</b>で小節の範囲選択、<b>右クリック</b>でその場のメニュー（コピー・移調・拍子や調の変更など）、<b>ダブルクリック</b>でそこから入力。<br>
+        ・<b>Ctrl+ホイール</b>で拡大縮小、<b>Ctrl+0</b> で画面に合わせる（大きな画面ではページを横に並べます）。<br>
+        ・<b>Ctrl+S</b> で .kanade ファイルに保存（2回目からは同じファイルに上書き）。ファイルはウィンドウにドラッグ＆ドロップでも開けます。</p>
         <h3>キーボードショートカット（Finale との対応）</h3>
         <table>
           <tr><th>操作</th><th>KANADE</th><th>Finale では</th></tr>
@@ -471,12 +513,17 @@ export class Dialogs {
           <tr><td>コピー・切り取り・貼り付け</td><td>${k('Ctrl')}+${k('C')} ${k('X')} ${k('V')}</td><td>同じ</td></tr>
           <tr><td>小節を追加</td><td>${k('Ctrl')}+${k('B')}</td><td>小節ツール</td></tr>
           <tr><td>MusicXML 書き出し／印刷</td><td>${k('Ctrl')}+${k('E')} / ${k('Ctrl')}+${k('P')}</td><td>—</td></tr>
+          <tr><td>保存／名前を付けて保存</td><td>${k('Ctrl')}+${k('S')} / ${k('Ctrl')}+${k('Shift')}+${k('S')}</td><td>同じ</td></tr>
+          <tr><td>開く／新規作成</td><td>${k('Ctrl')}+${k('O')} / ${k('Alt')}+${k('N')}</td><td>${k('Ctrl')}+${k('O')} / ${k('Ctrl')}+${k('N')}</td></tr>
+          <tr><td>拡大／縮小／画面に合わせる</td><td>${k('Ctrl')}+${k('+')} ${k('-')} / ${k('Ctrl')}+${k('0')}</td><td>—</td></tr>
+          <tr><td>この使い方</td><td>${k('F1')} / ${k('?')}</td><td>—</td></tr>
         </table>
-        <p style="font-size:13px;color:var(--muted)">※ iPad では Ctrl の代わりに ⌘（Command）でも動きます。</p>
+        <p style="font-size:13px;color:var(--muted)">※ iPad では Ctrl の代わりに ⌘（Command）でも動きます。新規作成が Alt+N なのは、ブラウザでは Ctrl+N が「新しいウィンドウ」に取られてしまうためです。</p>
         <h3>Finale からの引っ越し</h3>
         <p>Finale で「ファイル → 書き出し → MusicXML」で保存し、KANADE の「ファイル → MusicXML を読み込む」で開きます（.musicxml / .xml / .mxl に対応）。</p>
         <h3>保存</h3>
-        <p>楽譜は自動でこの端末に保存されます（ファイル → 開く）。別の端末やソフトに渡すときは MusicXML に書き出してください。</p>
+        <p>楽譜は自動でこの端末に保存されます（ファイル → 開く の「最近の楽譜」）。<br>
+        PC では「ファイル → 保存」（Ctrl+S）で <b>.kanade ファイル</b>として好きな場所に保存できます。.kanade は KANADE の情報を全部そのまま残す形式で、iPad ⇄ PC の受け渡しにも使えます。ほかのソフトに渡すときは MusicXML に書き出してください。</p>
       </div>`,
       buttons: [{ label: '閉じる', cls: 'primary' }],
     });

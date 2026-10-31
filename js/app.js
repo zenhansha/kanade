@@ -12,7 +12,8 @@ import { bindKeys } from './ui/keys.js';
 import { Synth } from './audio/synth.js';
 import { Player } from './audio/player.js';
 import { MidiInput } from './midi.js';
-import { storage, saveFile } from './io/storage.js';
+import { storage, saveFile, canPickFiles, pickOpenFile, writeHandle, ensurePermission } from './io/storage.js';
+import { serializeKanade, parseKanade, KANADE_EXT, KANADE_MIME } from './io/kanade.js';
 import { exportMusicXML, importMusicXML } from './io/musicxml.js';
 import { readMxl } from './io/mxl.js';
 import { SMUFL } from './smufl.js';
@@ -32,6 +33,8 @@ export class App {
     this.synth = new Synth();
     this.player = new Player(this.synth);
     this.docId = null;
+    // PC で .kanade ファイルとして保存・オープンしたとき、そのファイル（上書き保存先）
+    this.fileHandle = null; this.fileName = null; this.fileDirty = false;
     this.clip = null;
     const cv = document.createElement('canvas').getContext('2d');
     this.measureText = (s, size) => { cv.font = `${size * 20}px "Times New Roman","Hiragino Mincho ProN","Yu Mincho",serif`; return cv.measureText(String(s)).width / 20; };
@@ -69,15 +72,18 @@ export class App {
       setTimeout(() => this.dialogs.newScore(true), 300);
     }
     await document.fonts.load('20px Bravura').catch(() => {});
-    this.view.zoom = this.view.fitZoom();
+    this.view.resetZoom();
     this.relayout();
-    window.addEventListener('resize', () => { this.view.rescale(); this.afterZoom(); });
+    window.addEventListener('resize', () => { this.view.onResize(); this.afterZoom(); });
+    this.bindDesktop();
   }
 
   // ───────── ドキュメント ─────────
-  newDoc(score) {
+  // opts.id = 既存の楽譜として開き直すとき、opts.handle = PC のファイル（.kanade）
+  newDoc(score, opts = {}) {
     this.score = score;
-    this.docId = storage.newId();
+    this.docId = opts.id || storage.newId();
+    this.fileHandle = opts.handle || null; this.fileName = opts.handle ? opts.handle.name : null; this.fileDirty = false;
     this.history.clear();
     this.state.sel = null; this.state.caret = { p: 0, s: 0, m: 0, v: 0, t: 0 }; this.state.lastId = null; this.state.voice = 0;
     this.setLastPitchForStaff();
@@ -86,6 +92,7 @@ export class App {
   openDoc(doc) {
     this.score = doc.score;
     this.docId = doc.id;
+    this.fileHandle = doc.handle || null; this.fileName = doc.fileName || null; this.fileDirty = !!doc.fileDirty;
     this.history.clear();
     this.state.sel = null; this.state.caret = { p: 0, s: 0, m: 0, v: 0, t: 0 }; this.state.lastId = null; this.state.voice = 0;
     this.setLastPitchForStaff();
@@ -94,13 +101,53 @@ export class App {
   async save() {
     if (!this.score) return;
     clearTimeout(this.saveTimer);
-    const doc = { id: this.docId, title: this.score.meta.title || '無題', updated: Date.now(), score: this.score };
+    const doc = { id: this.docId, title: this.score.meta.title || '無題', updated: Date.now(), score: this.score, handle: this.fileHandle, fileName: this.fileName, fileDirty: this.fileDirty };
     try {
       await storage.put(doc);
       localStorage.setItem('kanade.last', this.docId);
     } catch (e) { console.warn('保存失敗', e); }
   }
-  scheduleSave() { clearTimeout(this.saveTimer); this.saveTimer = setTimeout(() => this.save(), 700); }
+  scheduleSave() {
+    clearTimeout(this.saveTimer); this.saveTimer = setTimeout(() => this.save(), 700);
+    // 端末内には自動保存されるが、PC のファイルにはまだ書いていない印（タイトルの ●）
+    if (this.fileHandle && !this.fileDirty) { this.fileDirty = true; this.updateTitle(); }
+  }
+
+  // ───────── PC のファイル ─────────
+  fileBaseName() {
+    const base = this.fileName ? this.fileName.replace(/\.kanade$/i, '') : (this.score.meta.title || 'score');
+    return base.replace(/[\\/:*?"<>|]/g, '_');
+  }
+  // Ctrl+S：PC では .kanade ファイルに上書き保存（初回は保存先を選ぶ）。iPad では端末内に保存。
+  // saveAs = 名前を付けて保存（iPad では .kanade ファイルを書き出して「ファイル」アプリなどへ）
+  async saveToFile(saveAs = false) {
+    if (!canPickFiles && !saveAs) { await this.save(); return this.toast('この端末に保存しました'); }
+    const blob = new Blob([serializeKanade(this.score)], { type: KANADE_MIME });
+    try {
+      let h = saveAs ? null : this.fileHandle;
+      if (h && !(await ensurePermission(h))) h = null;
+      if (h) await writeHandle(h, blob);
+      else {
+        h = await saveFile(this.fileBaseName() + KANADE_EXT, blob, 'kanade');
+        if (!h) return;
+      }
+      if (typeof h === 'object') { this.fileHandle = h; this.fileName = h.name; this.fileDirty = false; }
+      await this.save();
+      this.updateTitle();
+      this.toast(typeof h === 'object' ? `「${h.name}」に保存しました` : '.kanade ファイルを書き出しました');
+    } catch (e) {
+      console.error(e);
+      this.toast('保存できませんでした：' + e.message, 3500);
+    }
+  }
+  // 「開く」ボタン：PC はファイル選択ダイアログ、iPad は「ファイル」アプリから選ぶ
+  async openFileDialog() {
+    if (!canPickFiles) return document.getElementById('fileInput').click();
+    try {
+      const h = await pickOpenFile();
+      if (h) await this.openFile(await h.getFile(), h);
+    } catch (e) { console.error(e); this.toast('開けませんでした：' + e.message, 3500); }
+  }
 
   // ───────── 描画 ─────────
   relayout() {
@@ -140,8 +187,9 @@ export class App {
     this.palette.update();
     document.getElementById('btnUndo').disabled = !this.history.canUndo;
     document.getElementById('btnRedo').disabled = !this.history.canRedo;
-    document.getElementById('docTitle').textContent = this.score.meta.title || '無題';
-    document.title = (this.score.meta.title || '無題') + ' — KANADE';
+    document.body.classList.toggle('mode-input', st.mode === 'input');
+    if (st.mode === 'input') { this.view.pagesEl.style.cursor = ''; this.view.hover(null); }
+    this.updateTitle();
     document.getElementById('zoomLabel').textContent = Math.round(this.view.zoom * 100) + '%';
     const A = this.L ? this.L.attrs : measureAttrs(this.score);
     const m = this.focusMeasure();
@@ -165,9 +213,19 @@ export class App {
       parts.push(`範囲選択：第${st.sel.m1 + 1}〜${st.sel.m2 + 1}小節`);
     } else parts.push('選択モード');
     document.getElementById('status').textContent = parts.join('　');
+    const mouse = matchMedia('(pointer: fine)').matches;
     document.getElementById('hint').textContent = st.mode === 'input'
-      ? '五線をタップ／A〜G キー／MIDI鍵盤で入力 · Esc で選択モード'
-      : '音符をタップで選択 · 上下ドラッグで音高 · 小節の空きをタップで小節選択 · N で入力';
+      ? `五線を${mouse ? 'クリック' : 'タップ'}／A〜G キー／MIDI鍵盤で入力 · Esc で選択モード`
+      : mouse ? '音符をクリックで選択 · ドラッグで範囲選択 · 右クリックでメニュー · ダブルクリックで入力'
+        : '音符をタップで選択 · 上下ドラッグで音高 · 小節の空きをタップで小節選択 · N で入力';
+  }
+  updateTitle() {
+    const t = this.score.meta.title || '無題';
+    const mark = this.fileDirty ? '● ' : '';
+    const el = document.getElementById('docTitle');
+    el.textContent = mark + t;
+    el.title = this.fileName ? `ファイル：${this.fileName}${this.fileDirty ? '（未保存の変更あり · Ctrl+S で保存）' : ''}` : 'クリックでスコア情報を編集';
+    document.title = mark + t + ' — KANADE';
   }
 
   focusMeasure() {
@@ -572,21 +630,35 @@ export class App {
   // ───────── ファイル ─────────
   async exportXML() {
     const xml = exportMusicXML(this.score);
-    const name = (this.score.meta.title || 'score').replace(/[\\/:*?"<>|]/g, '_') + '.musicxml';
-    await saveFile(name, new Blob([xml], { type: 'application/vnd.recordare.musicxml+xml' }));
-  }
-  async importFile(file) {
+    const name = this.fileBaseName() + '.musicxml';
     try {
-      let xml;
-      if (/\.mxl$/i.test(file.name)) xml = await readMxl(await file.arrayBuffer());
-      else xml = await file.text();
-      const score = importMusicXML(xml);
-      if (!score.meta.title || score.meta.title === '無題') score.meta.title = file.name.replace(/\.(musicxml|xml|mxl)$/i, '');
-      this.newDoc(score);
-      this.view.zoom = this.view.fitZoom();
+      const r = await saveFile(name, new Blob([xml], { type: 'application/vnd.recordare.musicxml+xml' }), 'musicxml');
+      if (r && typeof r === 'object') this.toast(`「${r.name}」に書き出しました`);
+    } catch (e) { console.error(e); this.toast('書き出せませんでした：' + e.message, 3500); }
+  }
+  // ファイルを開く：.kanade はそのまま、MusicXML / .mxl は変換して読み込む。
+  // handle = PC で選んだファイル（.kanade ならそこへ上書き保存できるように覚えておく）
+  async openFile(file, handle = null) {
+    try {
+      const isKanade = /\.kanade$/i.test(file.name);
+      let score;
+      if (isKanade) score = parseKanade(await file.text());
+      else {
+        const xml = /\.mxl$/i.test(file.name) ? await readMxl(await file.arrayBuffer()) : await file.text();
+        score = importMusicXML(xml);
+        if (!score.meta.title || score.meta.title === '無題') score.meta.title = file.name.replace(/\.(musicxml|xml|mxl)$/i, '');
+      }
+      await this.save(); // 今の楽譜を確実に保存してから切り替える
+      if (this.player.playing) this.player.stop();
+      if (isKanade && handle) {
+        // 前に開いたことのあるファイルなら、一覧に同じものを増やさず同じ楽譜として開き直す
+        const known = await storage.findByHandle(handle);
+        this.newDoc(score, { id: known?.id, handle });
+      } else this.newDoc(score);
+      this.view.resetZoom();
       this.relayout();
       this.view.scroller.scrollTo({ top: 0 });
-      this.toast(`「${score.meta.title}」を読み込みました（${score.parts.length}パート・${score.measures.length}小節）`, 2600);
+      this.toast(`「${score.meta.title || file.name}」を開きました（${score.parts.length}パート・${score.measures.length}小節）`, 2600);
     } catch (e) {
       console.error(e);
       this.toast('読み込めませんでした：' + e.message, 3500);
@@ -607,7 +679,7 @@ export class App {
     $('btnRewind').onclick = () => this.rewind();
     $('btnZoomIn').onclick = () => this.view.setZoom(this.view.zoom * 1.15);
     $('btnZoomOut').onclick = () => this.view.setZoom(this.view.zoom / 1.15);
-    $('zoomLabel').onclick = () => this.view.setZoom(this.view.fitZoom());
+    $('zoomLabel').onclick = () => this.zoomToFit();
     $('btnFile').onclick = (e) => this.dialogs.fileMenu(e.currentTarget);
     $('btnMeasure').onclick = (e) => this.dialogs.measureMenu(e.currentTarget);
     $('btnScore').onclick = (e) => this.dialogs.scoreMenu(e.currentTarget);
@@ -616,7 +688,49 @@ export class App {
     $('btnHelp').onclick = () => this.dialogs.help();
     $('btnMidi').onclick = () => this.dialogs.midi();
     document.querySelector('#btnTempo .note-glyph').textContent = G.metNoteQuarterUp.c;
-    $('fileInput').onchange = (e) => { const f = e.target.files[0]; if (f) this.importFile(f); e.target.value = ''; };
+    $('fileInput').onchange = (e) => { const f = e.target.files[0]; if (f) this.openFile(f); e.target.value = ''; };
+  }
+  zoomToFit() { this.view.setZoom(this.view.fitZoom()); this.view.fit = true; }
+
+  // ───────── PC 向け：ドラッグ＆ドロップ・ファイルの関連付け・インストール ─────────
+  bindDesktop() {
+    const appEl = document.getElementById('app');
+    // ファイルをウィンドウにドラッグ＆ドロップで開く
+    const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
+    let depth = 0;
+    window.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; appEl.classList.add('dropping'); });
+    window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+    window.addEventListener('dragleave', (e) => { if (hasFiles(e) && --depth <= 0) { depth = 0; appEl.classList.remove('dropping'); } });
+    window.addEventListener('drop', async (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      depth = 0; appEl.classList.remove('dropping');
+      const item = [...e.dataTransfer.items].find(i => i.kind === 'file');
+      if (!item) return;
+      // どちらも await より前に取り出す（ドロップの処理が終わると読めなくなる）
+      const hp = item.getAsFileSystemHandle ? item.getAsFileSystemHandle() : null;
+      const file = item.getAsFile();
+      const h = hp ? await hp.catch(() => null) : null;
+      this.openFile(file, h && h.kind === 'file' ? h : null);
+    });
+    // インストールしたアプリで .kanade / .musicxml をダブルクリックしたとき（manifest の file_handlers）
+    if ('launchQueue' in window) {
+      window.launchQueue.setConsumer(async (p) => { const h = p.files && p.files[0]; if (h) this.openFile(await h.getFile(), h); });
+    }
+    // Chrome / Edge の「アプリとしてインストール」をファイルメニューから出せるように取っておく
+    window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); this.installPrompt = e; });
+    window.addEventListener('appinstalled', () => { this.installPrompt = null; this.toast('インストールしました。スタートメニューから起動できます', 3500); });
+    // ウィンドウやタブを閉じる・隠すときにすぐ保存（自動保存の 0.7 秒待ちを待たない）
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') this.save(); });
+    // 右クリックでブラウザのメニューを出さない（楽譜の上では KANADE のメニューを出す）
+    appEl.addEventListener('contextmenu', (e) => { if (!e.target.closest('input, textarea, select')) e.preventDefault(); });
+  }
+  get isInstalled() { return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; }
+  async install() {
+    if (!this.installPrompt) return this.dialogs.installHelp();
+    this.installPrompt.prompt();
+    await this.installPrompt.userChoice.catch(() => null);
+    this.installPrompt = null;
   }
 
   // ───────── タップ・ペン・マウス ─────────
@@ -645,6 +759,9 @@ export class App {
         if (near && st.sel?.kind === 'event' && near.id === st.sel.id && !near.g.rest) {
           drag.pitchDrag = { id: near.id, startPos: h.pos, applied: 0, noteIndex: st.sel.noteIndex };
           drag.lockScroll = true;
+        } else if (e.pointerType !== 'touch') {
+          // マウス・ペンでなぞると小節の範囲選択（指はスクロールなので対象外）
+          drag.range = { m: h.m, r: h.r };
         }
       }
       if (drag.lockScroll || e.pointerType === 'mouse') { try { pagesEl.setPointerCapture(e.pointerId); } catch (err) { /* 未対応 */ } }
@@ -653,13 +770,27 @@ export class App {
     pagesEl.addEventListener('pointermove', (e) => {
       const st = this.state;
       if (!drag || drag.id !== e.pointerId) {
-        // マウスのホバーでゴースト音符
-        if (e.pointerType === 'mouse' && st.mode === 'input') this.updateGhost(this.view.hit(this.view.locate(e.clientX, e.clientY)));
+        // マウスを乗せただけのとき：入力モードはゴースト音符、選択モードは音符をうっすら色付け
+        if (e.pointerType !== 'mouse') return;
+        const h = this.view.hit(this.view.locate(e.clientX, e.clientY));
+        if (st.mode === 'input') { this.view.hover(null); pagesEl.style.cursor = ''; this.updateGhost(h); }
+        else this.hoverAt(h);
         return;
       }
       if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 8) drag.moved = true;
       const h = this.view.hit(this.view.locate(e.clientX, e.clientY));
       if (st.mode === 'input' && (drag.type !== 'touch' || !drag.moved)) this.updateGhost(h);
+      if (drag.range && drag.moved && h) {
+        const a = drag.range;
+        const s = st.sel;
+        const m1 = Math.min(a.m, h.m), m2 = Math.max(a.m, h.m), r1 = Math.min(a.r, h.r), r2 = Math.max(a.r, h.r);
+        drag.rangeDone = true;
+        if (!(s?.kind === 'range' && s.m1 === m1 && s.m2 === m2 && s.r1 === r1 && s.r2 === r2)) {
+          st.sel = { kind: 'range', m1, m2, r1, r2, a: a.m, ra: a.r };
+          this.view.hover(null);
+          this.refreshOverlays(); this.updateUI();
+        }
+      }
       if (drag.pitchDrag && h) {
         const pd = drag.pitchDrag;
         const want = h.pos - pd.startPos;
@@ -679,6 +810,7 @@ export class App {
       const d = drag; drag = null;
       const st = this.state;
       if (d.pitchDrag) { if (d.pitchDrag.applied) this.scheduleSave(); return; }
+      if (d.rangeDone) { this.lastRangeTap = 0; return; }
       if (cancel || (d.moved && d.type === 'touch')) { if (e.pointerType !== 'mouse') this.view.hideOverlay('ghost'); return; }
       const h = this.view.hit(this.view.locate(e.clientX, e.clientY)) || d.h;
       if (e.pointerType !== 'mouse') this.view.hideOverlay('ghost');
@@ -688,7 +820,63 @@ export class App {
     };
     pagesEl.addEventListener('pointerup', (e) => finish(e, false));
     pagesEl.addEventListener('pointercancel', (e) => finish(e, true));
-    pagesEl.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') this.view.hideOverlay('ghost'); });
+    pagesEl.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { this.view.hideOverlay('ghost'); this.view.hover(null); } });
+    // ダブルクリック（ダブルタップ）：選んだ所から入力を始める
+    pagesEl.addEventListener('dblclick', () => { if (this.state.mode === 'select' && this.state.sel) this.setMode('input'); });
+    // 右クリック：その場で使えるメニュー
+    pagesEl.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      const h = this.view.hit(this.view.locate(e.clientX, e.clientY));
+      if (h) this.contextMenu(h, e);
+    });
+  }
+
+  // 選択モードでマウスを乗せた音符を色付けし、カーソルの形で「何ができるか」を見せる
+  hoverAt(h) {
+    const near = h && this.view.nearestEvent(h);
+    const sel = this.state.sel;
+    const onSel = near && sel?.kind === 'event' && sel.id === near.id;
+    this.view.hover(near && !onSel ? near.id : null);
+    this.view.pagesEl.style.cursor = !near ? '' : onSel && !near.g.rest ? 'ns-resize' : 'pointer';
+  }
+
+  // 右クリックメニュー（Finale の右クリックと同じ感覚で、よく使う操作をその場で）
+  contextMenu(h, e) {
+    const st = this.state;
+    if (st.mode === 'input') this.setMode('select');
+    const near = this.view.nearestEvent(h);
+    // 右クリックした所が今の選択に入っていなければ、そこを選び直す
+    const inRange = st.sel?.kind === 'range' && h.m >= st.sel.m1 && h.m <= st.sel.m2 && h.r >= st.sel.r1 && h.r <= st.sel.r2;
+    const onSel = near && st.sel?.kind === 'event' && st.sel.id === near.id;
+    if (!inRange && !onSel) {
+      if (near) { st.sel = { kind: 'event', id: near.id, noteIndex: near.noteIndex ?? null }; st.voice = near.g.v; }
+      else st.sel = { kind: 'range', m1: h.m, m2: h.m, r1: h.r, r2: h.r, a: h.m, ra: h.r };
+      this.view.hover(null);
+      this.refreshOverlays(); this.updateUI();
+    }
+    const sel = st.sel;
+    const f = sel.kind === 'event' && E.findEvent(this.score, sel.id);
+    const isNote = f && !f.ev.rest;
+    const from = this.selLoc().m;
+    const items = [
+      { label: 'ここから入力', kbd: 'Enter', run: () => this.setMode('input') },
+      { label: 'ここから再生', run: () => { if (this.player.playing) this.player.stop(); this.playFrom = from; this.togglePlay(); } },
+      '-',
+      { label: '切り取り', kbd: 'Ctrl+X', run: () => this.copy(true) },
+      { label: 'コピー', kbd: 'Ctrl+C', run: () => this.copy(false) },
+      ...(this.clip ? [{ label: '貼り付け', kbd: 'Ctrl+V', run: () => this.paste() }] : []),
+      { label: sel.kind === 'range' ? '中身を消す' : isNote ? '休符にする' : '削除', kbd: 'Delete', run: () => this.deleteSel() },
+    ];
+    if (isNote || sel.kind === 'range') items.push('-',
+      { label: '半音上げる', kbd: '↑', run: () => this.shiftPitch('semi', 1) },
+      { label: '半音下げる', kbd: '↓', run: () => this.shiftPitch('semi', -1) },
+      { label: '1オクターブ上げる', kbd: 'Ctrl+↑', run: () => this.shiftPitch('octave', 1) },
+      { label: '1オクターブ下げる', kbd: 'Ctrl+↓', run: () => this.shiftPitch('octave', -1) });
+    if (isNote) items.push({ label: 'タイ', kbd: 'T', run: () => this.tie() });
+    if (f) items.push({ label: '3連符にする', kbd: 'Ctrl+3', run: () => this.makeTuplet(3) });
+    const pt = { x: e.clientX, y: e.clientY };
+    items.push('-', { label: `第${from + 1}小節の設定（拍子・調・音部記号…）`, kbd: '▸', run: () => this.dialogs.measureMenu(pt) });
+    this.dialogs.menu(pt, items);
   }
 
   // 入力モードのタップ位置 → どのタイミング・どの高さに入れるか
