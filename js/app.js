@@ -1,6 +1,7 @@
 // アプリ本体：状態（楽譜・カーソル・選択・入力設定）を持ち、操作を楽譜に反映して再描画する
 import { createScore, measureAttrs, INST, clefInfo, staffList } from './core/score.js';
 import * as E from './core/edit.js';
+import * as K from './core/marks.js';
 import { History } from './core/history.js';
 import { TYPE_TICKS, dottedTicks, spellMidi, midiOf, diatonic, fromDiatonic, keyAlter, pitchName, STEP_JA, TPQ, TYPE_JA } from './core/music.js';
 import { layoutScore } from './engrave/layout.js';
@@ -28,7 +29,13 @@ export class App {
       mode: 'select', caret: { p: 0, s: 0, m: 0, v: 0, t: 0 }, sel: null,
       dur: { type: 'quarter', dots: 0 }, rest: false, chord: false, voice: 0,
       lastId: null, lastPitch: { step: 'C', alter: 0, octave: 5 }, colorVoices: true,
+      grace: false, openSpan: null, verse: 0,
     };
+    // 表示の設定：part = パート譜で表示するパート（null ならスコア）、transposed = 移調楽器を記譜音で表示
+    let tr = false;
+    try { tr = localStorage.getItem('kanade.transposed') === '1'; } catch (e) { /* 使えない環境 */ }
+    this.viewOpts = { part: null, transposed: tr, multiRest: true };
+    this.textEd = null; // 歌詞・コードネームの入力中
     this.history = new History();
     this.synth = new Synth();
     this.player = new Player(this.synth);
@@ -74,6 +81,7 @@ export class App {
     await document.fonts.load('20px Bravura').catch(() => {});
     this.view.resetZoom();
     this.relayout();
+    this.updateViewButton();
     window.addEventListener('resize', () => { this.view.onResize(); this.afterZoom(); });
     this.bindDesktop();
   }
@@ -85,17 +93,23 @@ export class App {
     this.docId = opts.id || storage.newId();
     this.fileHandle = opts.handle || null; this.fileName = opts.handle ? opts.handle.name : null; this.fileDirty = false;
     this.history.clear();
-    this.state.sel = null; this.state.caret = { p: 0, s: 0, m: 0, v: 0, t: 0 }; this.state.lastId = null; this.state.voice = 0;
-    this.setLastPitchForStaff();
+    this.resetDocState();
     this.save();
+  }
+  resetDocState() {
+    const st = this.state;
+    st.sel = null; st.caret = { p: 0, s: 0, m: 0, v: 0, t: 0 }; st.lastId = null; st.voice = 0; st.grace = false; st.openSpan = null;
+    this.viewOpts.part = null;
+    if (this.textEd) this.closeEditor();
+    this.setLastPitchForStaff();
+    if (this.view) this.updateViewButton();
   }
   openDoc(doc) {
     this.score = doc.score;
     this.docId = doc.id;
     this.fileHandle = doc.handle || null; this.fileName = doc.fileName || null; this.fileDirty = !!doc.fileDirty;
     this.history.clear();
-    this.state.sel = null; this.state.caret = { p: 0, s: 0, m: 0, v: 0, t: 0 }; this.state.lastId = null; this.state.voice = 0;
-    this.setLastPitchForStaff();
+    this.resetDocState();
     try { localStorage.setItem('kanade.last', doc.id); } catch (e) { /* プライベートモード */ }
   }
   async save() {
@@ -152,7 +166,9 @@ export class App {
   // ───────── 描画 ─────────
   relayout() {
     const t0 = performance.now();
-    this.L = layoutScore(this.score, { measureText: this.measureText });
+    const vo = this.viewOpts;
+    if (vo.part != null && !this.score.parts[vo.part]) vo.part = null;
+    this.L = layoutScore(this.score, { measureText: this.measureText, parts: vo.part != null ? [vo.part] : null, transposed: vo.transposed, multiRest: vo.multiRest });
     this.view.render(this.L);
     this.layoutMs = performance.now() - t0;
     this.refreshOverlays();
@@ -167,7 +183,8 @@ export class App {
       this.view.showCaret(st.caret, g + (st.dur.dots ? G.metAugmentationDot.c : ''));
     } else this.view.hideOverlay('caret');
     const ids = [];
-    if (st.sel?.kind === 'event') ids.push(st.sel.id);
+    if (st.sel?.kind === 'event') ids.push(...(st.sel.to ? this.eventSpanIds(st.sel.id, st.sel.to) : [st.sel.id]));
+    if (st.sel?.kind === 'mark') ids.push(st.sel.key);
     if (st.sel?.kind === 'range') {
       this.view.showRange(st.sel);
       ids.push(...E.rangeEventIds(this.score, this.rangeStaves(st.sel)));
@@ -202,13 +219,18 @@ export class App {
       const c = st.caret;
       const beat = A[c.m] ? 1 + c.t / ((TPQ * 4) / A[c.m].time.beatType) : 1;
       parts.push(`入力モード · ${part?.name || ''} · 第${c.m + 1}小節 ${+beat.toFixed(2)}拍目 · 声部${st.voice + 1}`);
-      parts.push(`${TYPE_JA[st.dur.type]}${st.dur.dots ? '（付点）' : ''}${st.rest ? '・休符' : ''}${st.chord ? '・和音' : ''}`);
+      parts.push(`${TYPE_JA[st.dur.type]}${st.dur.dots ? '（付点）' : ''}${st.rest ? '・休符' : ''}${st.chord ? '・和音' : ''}${st.grace ? '・装飾音符' : ''}${st.openSpan ? '・' + K.SPANS[st.openSpan.k].ja.replace(/（.*/, '') + 'を入力中' : ''}`);
+    } else if (st.sel?.kind === 'event' && st.sel.to) {
+      parts.push(`選択：音符 ${this.eventSpanIds(st.sel.id, st.sel.to).length} 個（Shift+←→ で広げる）· S でスラー、< > で松葉`);
     } else if (st.sel?.kind === 'event') {
       const f = E.findEvent(this.score, st.sel.id);
       if (f) {
         const desc = f.ev.rest ? '休符' : f.ev.notes.map(n => `${pitchName(n)}（${STEP_JA[n.step]}）`).join(' + ');
         parts.push(`選択：${part?.name || ''} 第${f.m + 1}小節 · ${desc} · ${TYPE_JA[f.ev.type]}${f.ev.dots ? '（付点）' : ''}`);
       }
+    } else if (st.sel?.kind === 'mark') {
+      const isSpan = st.sel.ref.type === 'span';
+      parts.push(`選択：${this.markName(st.sel.ref)}${isSpan ? ' · ←→ で終わり、Shift+←→ で始まりを動かす' : ' · ダブルクリック（Enter）で編集'} · Delete で削除`);
     } else if (st.sel?.kind === 'range') {
       parts.push(`範囲選択：第${st.sel.m1 + 1}〜${st.sel.m2 + 1}小節`);
     } else parts.push('選択モード');
@@ -240,6 +262,14 @@ export class App {
     if (!s) return null;
     if (s.kind === 'event') { const f = E.findEvent(this.score, s.id); return f ? { p: f.p, s: f.s, m: f.m, v: f.v, t: f.t } : null; }
     if (s.kind === 'range') { const row = this.L.rows[s.r1]; return { p: row.p, s: row.s, m: s.m1, v: 0, t: 0 }; }
+    if (s.kind === 'mark') {
+      const r = s.ref;
+      if (r.type === 'lyr') { const f = E.findEvent(this.score, r.id); return f ? { p: f.p, s: f.s, m: f.m, v: f.v, t: f.t } : null; }
+      if (r.type === 'meas') return { p: this.L.rows[0].p, s: this.L.rows[0].s, m: r.m, v: 0, t: 0 };
+      const sm = this.score.parts[r.p]?.staves[r.s]?.measures[r.m];
+      const t = r.type === 'dir' ? sm?.dirs?.[r.idx]?.t : sm?.spans?.[r.idx]?.t;
+      return { p: r.p, s: r.s, m: r.m, v: 0, t: t || 0 };
+    }
     return null;
   }
 
@@ -288,8 +318,11 @@ export class App {
       st.sel = null;
       this.setLastPitchForStaff();
     } else {
+      this.closeOpenSpan();
+      st.grace = false;
       if (st.lastId && E.findEvent(this.score, st.lastId)) st.sel = { kind: 'event', id: st.lastId, noteIndex: null };
     }
+    if (this.textEd) this.closeEditor();
     st.mode = mode;
     this.refreshOverlays(); this.updateUI();
     if (mode === 'input') this.revealCaret();
@@ -340,17 +373,26 @@ export class App {
   }
 
   // ───────── 音の入力 ─────────
+  // 音名キー：画面に見えている譜（記譜音表示なら記譜音）で一番近い高さを選び、楽譜に入れる実音にして返す
   pitchForLetter(step) {
-    const lp = this.state.lastPitch;
+    const loc = this.state.mode === 'input' ? this.state.caret : (this.selLoc() || this.state.caret);
+    const tr = this.transFor(loc.p);
+    const lp = tr ? K.toWritten(this.state.lastPitch, tr) : this.state.lastPitch;
     const ld = diatonic(lp);
     let best = null;
     for (let o = lp.octave - 1; o <= lp.octave + 1; o++) {
       const d = Math.abs(diatonic({ step, octave: o }) - ld);
       if (!best || d < best.d) best = { d, o };
     }
-    const A = this.L.attrs;
-    const m = this.state.mode === 'input' ? this.state.caret.m : (this.selLoc()?.m ?? 0);
-    return { step, alter: keyAlter(A[m]?.fifths || 0, step), octave: best.o };
+    const fifths = this.displayFifths(loc.p, loc.s, loc.m);
+    return this.concertOf({ step, alter: keyAlter(fifths, step), octave: best.o }, loc.p);
+  }
+  // 記譜音表示のときの移調（表示していない・移調楽器でなければ null）
+  transFor(p) { return this.viewOpts.transposed ? K.partTrans(this.score.parts[p] || {}) : null; }
+  concertOf(pitch, p) { const tr = this.transFor(p); return tr ? K.toConcert(pitch, tr) : pitch; }
+  displayFifths(p, s, m) {
+    const r = this.L.rows.findIndex(x => x.p === p && x.s === s);
+    return r >= 0 && this.L.fifthsAt ? this.L.fifthsAt(r, m) : (this.L.attrs[m]?.fifths || 0);
   }
 
   setLastPitchForStaff() {
@@ -374,6 +416,15 @@ export class App {
     const st = this.state;
     if (st.mode !== 'input') this.setMode('input');
     const chord = opts.chord || st.chord;
+    // 装飾音符モード：カーソルの音符の前に付ける（カーソルは進まない）
+    if (st.grace && !st.rest) {
+      const loc = opts.at || st.caret;
+      const type = ['eighth', '16th', '32nd'].includes(st.dur.type) ? st.dur.type : 'eighth';
+      this.edit('装飾音符', () => { if (!K.addGrace(this.score, loc, pitch, { type, slash: type === 'eighth', chord })) return false; });
+      st.lastPitch = pitch; this.audition([pitch], 0.2);
+      this.refreshOverlays(); this.revealCaret();
+      return;
+    }
     if (chord && st.lastId && E.findEvent(this.score, st.lastId)) {
       const id = st.lastId;
       this.edit('和音に追加', () => E.addToChord(this.score, id, pitch));
@@ -384,6 +435,7 @@ export class App {
         r = E.enterNote(this.score, loc, { type: st.dur.type, dots: st.dur.dots, pitches: st.rest ? null : [pitch] });
         st.caret = r.next;
         st.lastId = r.ids[0];
+        this.extendOpenSpan();
       });
     }
     if (!st.rest) { st.lastPitch = pitch; this.audition([pitch]); }
@@ -466,6 +518,13 @@ export class App {
 
   deleteSel() {
     const st = this.state;
+    if (st.mode === 'input' && st.grace) {
+      // 装飾音符モードの Backspace：カーソルの音符の装飾音を1つ消す
+      const at = E.eventAt(this.score, st.caret) || E.eventCovering(this.score, st.caret);
+      if (at?.ev.grace) this.edit('装飾音符の削除', () => K.removeLastGrace(this.score, at.ev.id));
+      return;
+    }
+    if (st.sel?.kind === 'mark' && st.mode === 'select') return this.deleteMark();
     if (st.mode === 'input') {
       // 入力モードの Backspace：1つ前の音符を消してカーソルを戻す
       const prev = E.caretPrev(this.score, st.caret);
@@ -511,6 +570,348 @@ export class App {
     this.toast(`${n}連符：続けて音を入力してください`);
   }
 
+  // ───────── Phase 2：記号（アーティキュレーション・強弱・線・歌詞・コードネーム・装飾音） ─────────
+  // 選んでいる音符（範囲なら全部）の id。入力モードでは直前に入れた音符
+  selIds() {
+    const st = this.state, s = st.sel;
+    if (st.mode === 'input') return st.lastId && E.findEvent(this.score, st.lastId) ? [st.lastId] : [];
+    if (!s) return [];
+    if (s.kind === 'event') return s.to ? this.eventSpanIds(s.id, s.to) : [s.id];
+    if (s.kind === 'range') return E.rangeEventIds(this.score, this.rangeStaves(s));
+    return [];
+  }
+  // 同じ声部の a から b までの音符（順番が逆でもよい）
+  eventSpanIds(a, b) {
+    let fa = E.findEvent(this.score, a), fb = E.findEvent(this.score, b);
+    if (!fa || !fb) return fa ? [a] : [];
+    const key = (f) => f.m * 1e7 + f.t;
+    if (key(fb) < key(fa)) [fa, fb] = [fb, fa];
+    const ids = [];
+    let cur = fa, guard = 0;
+    while (cur && guard++ < 5000 && key(cur) <= key(fb)) { ids.push(cur.ev.id); if (cur.ev.id === fb.ev.id) break; cur = E.nextEvent(this.score, cur); }
+    return ids;
+  }
+  // Shift+←→：音符の選択を1つずつ広げる・縮める
+  extendSel(dir) {
+    const st = this.state;
+    if (st.sel?.kind !== 'event') return;
+    const f = E.findEvent(this.score, st.sel.to || st.sel.id);
+    const nx = f && (dir > 0 ? E.nextEvent(this.score, f) : E.prevEvent(this.score, f));
+    if (!nx) return;
+    st.sel = { ...st.sel, to: nx.ev.id === st.sel.id ? undefined : nx.ev.id };
+    if (!st.sel.to) delete st.sel.to;
+    this.refreshOverlays(); this.updateUI();
+    const g = this.L.evGeom[nx.ev.id];
+    if (g) this.view.ensureVisible(g.page, g.x, g.oy + 2);
+  }
+  selHasArtic(key) {
+    const st = this.state;
+    if (st.sel?.kind === 'range') return false;
+    const ids = this.selIds();
+    return ids.length > 0 && ids.length < 200 && ids.every(id => E.findEvent(this.score, id)?.ev.art?.includes(key));
+  }
+  toggleArtic(key) {
+    const ids = this.selIds();
+    if (!ids.length) return this.toast('先に音符を選ぶか入力してください');
+    let on = null;
+    this.edit(K.ARTICS[key].ja, () => { on = K.toggleArtic(this.score, ids, key); if (on === null) return false; });
+    if (on === null) return this.toast('休符には付けられません');
+    this.toast(`${K.ARTICS[key].ja}を${on ? '付けました' : '外しました'}`);
+  }
+  // 強弱・文字を付ける位置（選んだ音符・範囲の先頭・入力モードなら直前の音）
+  markAnchor() {
+    const st = this.state;
+    const at = (f) => f && { p: f.p, s: f.s, m: f.m, t: f.t, v: f.v };
+    if (st.mode === 'input') return at(st.lastId && E.findEvent(this.score, st.lastId)) || { ...st.caret };
+    if (st.sel?.kind === 'event') return at(E.findEvent(this.score, this.selIds()[0]));
+    if (st.sel?.kind === 'range') { const row = this.L.rows[st.sel.r1]; return { p: row.p, s: row.s, m: st.sel.m1, t: 0, v: 0 }; }
+    return null;
+  }
+  addDynamic(v) {
+    const a = this.markAnchor();
+    if (!a) return this.toast('強弱記号を付ける音符を選んでください');
+    this.edit('強弱記号', () => K.addDir(this.score, a.p, a.s, a.m, { t: a.t, k: 'dyn', v }));
+    this.toast(`${v} を付けました`);
+  }
+  addTextDir(text, pos = 'above', it = true) {
+    const a = this.markAnchor();
+    if (!a) return this.toast('文字を付ける音符を選んでください');
+    if (!text) return;
+    this.edit('文字の表情記号', () => K.addDir(this.score, a.p, a.s, a.m, { t: a.t, k: 'text', text, pos, it }));
+  }
+
+  // 線（スラー・松葉・8va・ペダル・トリル）。選んだ音符の範囲に付ける。入力モードでは「入れながら伸ばす」
+  addSpan(k) {
+    const st = this.state;
+    const name = K.SPANS[k].ja;
+    if (st.mode === 'input') return this.toggleOpenSpan(k);
+    const s = st.sel;
+    if (!s || s.kind === 'mark') return this.toast(`${name}を付ける音符を選んでください（Shift+クリックで範囲）`);
+    const pairs = [];
+    if (s.kind === 'event') {
+      const ids = s.to ? this.eventSpanIds(s.id, s.to) : [s.id];
+      const fa = E.findEvent(this.score, ids[0]);
+      let fb = E.findEvent(this.score, ids[ids.length - 1]);
+      if (ids.length === 1) { // 1つだけなら次の音符まで
+        let nx = E.nextEvent(this.score, fa);
+        while (nx && nx.ev.rest) nx = E.nextEvent(this.score, nx);
+        if (nx) fb = nx;
+      }
+      pairs.push({ p: fa.p, s: fa.s, v: fa.v, a: { m: fa.m, t: fa.t }, b: { m: fb.m, t: fb.t } });
+    } else if (s.kind === 'range') {
+      for (let r = s.r1; r <= s.r2; r++) {
+        const row = this.L.rows[r];
+        const on = K.voiceOnsets(this.score, row.p, row.s, 0).filter(o => o.m >= s.m1 && o.m <= s.m2);
+        if (on.length) pairs.push({ p: row.p, s: row.s, v: 0, a: on[0], b: on[on.length - 1] });
+      }
+      if (!pairs.length) return this.toast('範囲に音符がありません');
+    }
+    let made = null;
+    this.edit(name, () => { for (const x of pairs) { const idx = K.addSpan(this.score, x.p, x.s, x.v, x.a, x.b, k); made = { p: x.p, s: x.s, m: Math.min(x.a.m, x.b.m), idx }; } });
+    if (made && pairs.length === 1) this.selectMark(`s:${made.p}:${made.s}:${made.m}:${made.idx}`);
+    this.toast(`${name}：←→ で終わり、Shift+←→ で始まりを動かせます`, 2600);
+  }
+  toggleOpenSpan(k) {
+    const st = this.state;
+    const name = K.SPANS[k].ja;
+    if (st.openSpan) { const was = st.openSpan.k; this.closeOpenSpan(); if (was === k) { this.toast(name.replace(/（.*/, '') + 'を終わりました'); return this.updateUI(); } }
+    const f = st.lastId && E.findEvent(this.score, st.lastId);
+    const a = f ? { m: f.m, t: f.t } : { m: st.caret.m, t: st.caret.t };
+    const p = f ? f.p : st.caret.p, s = f ? f.s : st.caret.s, v = f ? f.v : st.caret.v;
+    let idx;
+    this.edit(name, () => { idx = K.addSpan(this.score, p, s, v, a, a, k); });
+    st.openSpan = { k, p, s, m: a.m, idx };
+    this.toast(`${name.replace(/（.*/, '')}：続けて音を入れると伸びます。もう一度押すと終わり`, 2800);
+    this.updateUI();
+  }
+  extendOpenSpan() {
+    const st = this.state, o = st.openSpan;
+    if (!o) return;
+    const sp = this.score.parts[o.p]?.staves[o.s]?.measures[o.m]?.spans?.[o.idx];
+    const f = st.lastId && E.findEvent(this.score, st.lastId);
+    if (!sp || !f || f.p !== o.p || f.s !== o.s) return;
+    if (f.m < o.m || (f.m === o.m && f.t < sp.t)) return;
+    sp.dm = f.m - o.m; sp.t2 = f.t;
+  }
+  closeOpenSpan() {
+    const st = this.state, o = st.openSpan;
+    st.openSpan = null;
+    if (!o) return;
+    const sp = this.score.parts[o.p]?.staves[o.s]?.measures[o.m]?.spans?.[o.idx];
+    // 1つの音符だけのスラーは意味がないので消す
+    if (sp && sp.k === 'slur' && sp.dm === 0 && sp.t2 === sp.t) { K.removeSpan(this.score, o.p, o.s, o.m, o.idx); this.relayout(); this.scheduleSave(); }
+  }
+
+  toggleGrace() {
+    const st = this.state;
+    if (!st.grace && st.mode !== 'input') this.setMode('input');
+    st.grace = !st.grace;
+    this.toast(st.grace ? '装飾音符：入れた音はカーソルの音符の前に付きます（もう一度 ; で戻る）' : '装飾音符モードを終わりました', 2800);
+    this.refreshOverlays(); this.updateUI();
+  }
+
+  // ── 記号の選択・削除・編集 ──
+  selectMark(key) {
+    const mk = this.L.marks.find(m => m.key === key);
+    if (!mk) return;
+    this.state.sel = { kind: 'mark', key, ref: mk.ref };
+    this.view.hover(null);
+    this.refreshOverlays(); this.updateUI();
+  }
+  markName(ref) {
+    if (ref.type === 'lyr') { const f = E.findEvent(this.score, ref.id); return `歌詞「${f?.ev.lyr?.[ref.verse]?.t || ''}」（${ref.verse + 1}番）`; }
+    if (ref.type === 'meas') return { ending: 'カッコ（1番・2番）', segno: 'セーニョ', coda: 'コーダ', fine: 'Fine', toCoda: 'To Coda', jump: K.JUMPS[this.score.measures[ref.m]?.jump]?.text || 'D.C./D.S.' }[ref.what] + `（第${ref.m + 1}小節）`;
+    const sm = this.score.parts[ref.p]?.staves[ref.s]?.measures[ref.m];
+    if (ref.type === 'span') { const sp = sm?.spans?.[ref.idx]; return sp ? K.SPANS[sp.k].ja.replace(/（.*/, '') + `（第${ref.m + 1}〜${ref.m + sp.dm + 1}小節）` : '線'; }
+    const d = sm?.dirs?.[ref.idx];
+    if (!d) return '記号';
+    return d.k === 'dyn' ? `強弱記号 ${d.v}` : d.k === 'chord' ? `コードネーム ${d.text}` : `文字「${d.text}」`;
+  }
+  deleteMark() {
+    const st = this.state;
+    const r = st.sel?.ref;
+    if (!r) return;
+    const name = this.markName(r);
+    this.edit('記号の削除', () => {
+      if (r.type === 'dir') return K.removeDir(this.score, r.p, r.s, r.m, r.idx) || false;
+      if (r.type === 'span') return K.removeSpan(this.score, r.p, r.s, r.m, r.idx) || false;
+      if (r.type === 'lyr') return K.setLyric(this.score, r.id, r.verse, '');
+      if (r.type === 'meas') { delete this.score.measures[r.m][r.what]; return true; }
+      return false;
+    });
+    st.sel = null;
+    this.refreshOverlays(); this.updateUI();
+    this.toast(name + 'を削除しました');
+  }
+  editMark() {
+    const st = this.state;
+    const r = st.sel?.ref;
+    if (!r) return;
+    if (r.type === 'lyr') return this.startLyrics(r.id, r.verse);
+    if (r.type === 'meas') return this.dialogs.repeats(r.m);
+    if (r.type === 'span') return this.toast('線は ←→ / Shift+←→ で長さを変えられます');
+    const d = this.score.parts[r.p]?.staves[r.s]?.measures[r.m]?.dirs?.[r.idx];
+    if (!d) return;
+    if (d.k === 'chord') {
+      const at = E.eventAt(this.score, { p: r.p, s: r.s, m: r.m, v: 0, t: d.t }) || E.eventCovering(this.score, { p: r.p, s: r.s, m: r.m, v: 0, t: d.t });
+      return at && this.startChords(at.ev.id);
+    }
+    if (d.k === 'dyn') return this.dialogs.marksMenu('expr', null);
+    this.dialogs.textExpr(d, (nd) => this.edit('文字の表情記号', () => { Object.assign(d, nd); }));
+  }
+  nudgeMark(dir, which) {
+    const st = this.state;
+    const r = st.sel?.ref;
+    if (!r || r.type !== 'span') return;
+    let res = null;
+    this.edit('線の長さ', () => { res = K.nudgeSpan(this.score, r.p, r.s, r.m, r.idx, which, dir); if (!res) return false; });
+    if (res) this.selectMark(`s:${r.p}:${r.s}:${res.m}:${res.idx}`);
+  }
+
+  // ── 歌詞・コードネームの入力（楽譜の上に入力欄を出す） ──
+  startLyrics(id = null, verse = null) {
+    const st = this.state;
+    if (verse != null) st.verse = verse;
+    const target = id || this.firstSelectedNote();
+    if (!target) return this.toast('歌詞を付ける最初の音符を選んでください');
+    if (st.mode === 'input') { st.mode = 'select'; this.closeOpenSpan(); st.grace = false; }
+    this.textEd = { kind: 'lyr', id: target };
+    this.openEditor();
+    this.toast('スペースで次の音符、- でハイフン、Enter で終わり（Ctrl+↓ で2番へ）', 3200);
+  }
+  startChords(id = null) {
+    const st = this.state;
+    const target = id || this.firstSelectedNote(true);
+    if (!target) return this.toast('コードネームを付ける音符を選んでください');
+    if (st.mode === 'input') { st.mode = 'select'; this.closeOpenSpan(); st.grace = false; }
+    this.textEd = { kind: 'chord', id: target };
+    this.openEditor();
+    this.toast('例：C  Am7  F#m7b5  Bbmaj7/D · スペースで次の音符、Enter で終わり', 3200);
+  }
+  firstSelectedNote(allowRest = false) {
+    const st = this.state;
+    if (st.mode === 'input') return st.lastId && E.findEvent(this.score, st.lastId) ? st.lastId : null;
+    if (st.sel?.kind === 'mark' && st.sel.ref.type === 'lyr') return st.sel.ref.id;
+    const ids = this.selIds();
+    return ids.find(i => { const f = E.findEvent(this.score, i); return f && (allowRest || !f.ev.rest); }) || null;
+  }
+  openEditor() {
+    const te = this.textEd;
+    const f = te && E.findEvent(this.score, te.id);
+    const g = f && this.L.evGeom[te.id];
+    if (!g) return this.closeEditor();
+    const st = this.state;
+    st.sel = { kind: 'event', id: te.id, noteIndex: null };
+    this.refreshOverlays(); this.updateUI();
+    this.view.ensureVisible(g.page, g.x, g.oy + 4);
+    let value, label, y, x, align;
+    if (te.kind === 'lyr') {
+      const ly = f.ev.lyr?.[st.verse];
+      value = ly ? ly.t + (ly.h ? '-' : '') : '';
+      // その段にもう歌詞があれば同じ行に、なければ譜表の下に
+      const mk = this.L.marks.find(m => m.ref.type === 'lyr' && m.k === g.k && m.r === g.r && m.ref.verse === st.verse);
+      y = mk ? mk.oy + mk.y1 - 0.6 : g.oy + Math.max(g.bot, 4) + 2.8 + st.verse * 2.8;
+      x = g.x + (g.xr - g.x) / 2; align = 'center';
+      label = `歌詞 ${st.verse + 1}番`;
+    } else {
+      const sm = this.score.parts[f.p].staves[f.s].measures[f.m];
+      const d = (sm.dirs || []).find(q => q.k === 'chord' && q.t === f.t);
+      value = d ? d.text : '';
+      y = g.oy + Math.min(g.top, -0.5) - 1.6; x = g.x; align = 'left';
+      label = 'コード';
+    }
+    const inp = this.view.showEditor({ page: g.page, x, y, value, label, align, onKey: (e, el) => this.editorKey(e, el), onInput: (e, el) => this.editorInput(e, el) });
+    this.view.editorBlur = (el) => { if (this.textEd) { this.commitEditor(el.value, false); this.closeEditor(); } };
+    return inp;
+  }
+  editorKey(e, inp) {
+    if (e.isComposing || e.keyCode === 229) return; // 日本語入力の変換中はそのまま
+    const te = this.textEd;
+    if (!te) return;
+    const k = e.key;
+    e.stopPropagation();
+    if (k === ' ' || (k === 'Tab' && !e.shiftKey) || k === '_') { e.preventDefault(); this.commitEditor(inp.value, false); return this.editorMove(1); }
+    if (k === '-' && te.kind === 'lyr') { e.preventDefault(); this.commitEditor(inp.value, true); return this.editorMove(1); }
+    if (k === 'Tab' && e.shiftKey) { e.preventDefault(); this.commitEditor(inp.value, false); return this.editorMove(-1); }
+    if (k === 'Backspace' && inp.value === '') { e.preventDefault(); return this.editorMove(-1); }
+    if (k === 'Enter') { e.preventDefault(); this.commitEditor(inp.value, false); return this.closeEditor(); }
+    if (k === 'Escape') { e.preventDefault(); return this.closeEditor(); }
+    if (te.kind === 'lyr' && (k === 'ArrowDown' || k === 'ArrowUp') && (e.ctrlKey || e.metaKey || e.altKey)) {
+      e.preventDefault();
+      this.commitEditor(inp.value, false);
+      this.state.verse = Math.max(0, Math.min(7, this.state.verse + (k === 'ArrowDown' ? 1 : -1)));
+      this.openEditor();
+      this.toast(`歌詞 ${this.state.verse + 1}番`);
+    }
+  }
+  // 日本語入力で確定したあとの全角スペースも「次の音符へ」
+  editorInput(e, inp) {
+    if (e.isComposing || !inp.value.includes('　')) return;
+    const v = inp.value.replace(/　/g, '');
+    this.commitEditor(v, false);
+    this.editorMove(1);
+  }
+  commitEditor(raw, hyphen) {
+    const te = this.textEd;
+    if (!te) return;
+    const f = E.findEvent(this.score, te.id);
+    if (!f) return;
+    let text = String(raw || '').trim();
+    if (te.kind === 'lyr') {
+      if (text.endsWith('-')) { hyphen = true; text = text.replace(/-+$/, ''); }
+      const cur = f.ev.lyr?.[this.state.verse];
+      if ((cur?.t || '') === text && (!text || !!cur?.h === !!hyphen)) return;
+      this.edit('歌詞', () => K.setLyric(this.score, te.id, this.state.verse, text, hyphen));
+    } else {
+      const sm = this.score.parts[f.p].staves[f.s].measures[f.m];
+      const idx = (sm.dirs || []).findIndex(d => d.k === 'chord' && d.t === f.t);
+      if ((idx >= 0 ? sm.dirs[idx].text : '') === text) return;
+      this.edit('コードネーム', () => {
+        if (idx >= 0) K.removeDir(this.score, f.p, f.s, f.m, idx);
+        if (text) K.addDir(this.score, f.p, f.s, f.m, { t: f.t, k: 'chord', text });
+      });
+    }
+  }
+  editorMove(dir) {
+    const te = this.textEd;
+    if (!te) return;
+    let nx;
+    if (te.kind === 'lyr') nx = K.nextLyricTarget(this.score, te.id, dir);
+    else { const f = E.findEvent(this.score, te.id); const c = f && (dir > 0 ? E.nextEvent(this.score, f) : E.prevEvent(this.score, f)); nx = c?.ev.id; }
+    if (!nx) { this.closeEditor(); return this.toast(dir > 0 ? '最後の音符まで入れました' : 'いちばん最初の音符です'); }
+    te.id = nx;
+    this.openEditor();
+  }
+  closeEditor() {
+    if (!this.textEd && !this.view.editorEl) return;
+    this.textEd = null;
+    this.view.editorBlur = null;
+    this.view.hideEditor();
+    this.refreshOverlays(); this.updateUI();
+  }
+
+  // ── 表示（スコア / パート譜・記譜音） ──
+  setView(opts) {
+    Object.assign(this.viewOpts, opts);
+    try { localStorage.setItem('kanade.transposed', this.viewOpts.transposed ? '1' : '0'); } catch (e) { /* 使えない環境 */ }
+    const st = this.state;
+    if (this.textEd) this.closeEditor();
+    st.sel = null;
+    const vp = this.viewOpts.part;
+    if (vp != null && st.caret.p !== vp) { st.caret = { p: vp, s: 0, m: st.caret.m, v: st.voice, t: 0 }; this.setLastPitchForStaff(); }
+    this.relayout();
+    this.updateViewButton();
+    this.view.scroller.scrollTo({ top: 0 });
+  }
+  updateViewButton() {
+    const vo = this.viewOpts;
+    const el = document.getElementById('viewLabel');
+    if (!el) return;
+    el.textContent = vo.part != null ? (this.score.parts[vo.part]?.abbr || 'パート') : 'スコア';
+    document.getElementById('btnView').classList.toggle('on', vo.part != null || vo.transposed);
+    document.getElementById('btnView').title = (vo.part != null ? `パート譜：${this.score.parts[vo.part]?.name}` : 'スコア（全パート）') + (vo.transposed ? '・記譜音で表示中' : '・実音で表示中');
+  }
+
   // ───────── カーソル・選択の移動 ─────────
   moveCaret(dir) {
     const st = this.state;
@@ -519,8 +920,9 @@ export class App {
       this.revealCaret(); this.updateUI();
       return;
     }
+    if (st.sel?.kind === 'mark') return this.nudgeMark(dir, 'end');
     if (st.sel?.kind === 'event') {
-      const f = E.findEvent(this.score, st.sel.id);
+      const f = E.findEvent(this.score, st.sel.to || st.sel.id);
       const nx = dir > 0 ? E.nextEvent(this.score, f) : E.prevEvent(this.score, f);
       if (nx) { st.sel = { kind: 'event', id: nx.ev.id, noteIndex: null }; this.afterSelect(nx.ev); }
     } else if (st.sel?.kind === 'range') {
@@ -683,6 +1085,7 @@ export class App {
     $('btnFile').onclick = (e) => this.dialogs.fileMenu(e.currentTarget);
     $('btnMeasure').onclick = (e) => this.dialogs.measureMenu(e.currentTarget);
     $('btnScore').onclick = (e) => this.dialogs.scoreMenu(e.currentTarget);
+    $('btnView').onclick = (e) => this.dialogs.viewMenu(e.currentTarget);
     $('btnTempo').onclick = () => this.dialogs.tempo();
     $('docTitle').onclick = () => this.dialogs.scoreInfo();
     $('btnHelp').onclick = () => this.dialogs.help();
@@ -772,9 +1175,10 @@ export class App {
       if (!drag || drag.id !== e.pointerId) {
         // マウスを乗せただけのとき：入力モードはゴースト音符、選択モードは音符をうっすら色付け
         if (e.pointerType !== 'mouse') return;
-        const h = this.view.hit(this.view.locate(e.clientX, e.clientY));
+        const pt = this.view.locate(e.clientX, e.clientY);
+        const h = this.view.hit(pt);
         if (st.mode === 'input') { this.view.hover(null); pagesEl.style.cursor = ''; this.updateGhost(h); }
-        else this.hoverAt(h);
+        else this.hoverAt(h, pt);
         return;
       }
       if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 8) drag.moved = true;
@@ -812,32 +1216,64 @@ export class App {
       if (d.pitchDrag) { if (d.pitchDrag.applied) this.scheduleSave(); return; }
       if (d.rangeDone) { this.lastRangeTap = 0; return; }
       if (cancel || (d.moved && d.type === 'touch')) { if (e.pointerType !== 'mouse') this.view.hideOverlay('ghost'); return; }
-      const h = this.view.hit(this.view.locate(e.clientX, e.clientY)) || d.h;
+      const pt = this.view.locate(e.clientX, e.clientY);
+      const h = this.view.hit(pt) || d.h;
       if (e.pointerType !== 'mouse') this.view.hideOverlay('ghost');
-      if (!h) { if (st.mode === 'select') { st.sel = null; this.refreshOverlays(); this.updateUI(); } return; }
-      if (st.mode === 'input') this.tapInput(h, e);
-      else this.tapSelect(h, e);
+      if (st.mode === 'select') return this.tapSelect(h, e, pt);
+      if (h) this.tapInput(h, e);
     };
     pagesEl.addEventListener('pointerup', (e) => finish(e, false));
     pagesEl.addEventListener('pointercancel', (e) => finish(e, true));
     pagesEl.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { this.view.hideOverlay('ghost'); this.view.hover(null); } });
     // ダブルクリック（ダブルタップ）：選んだ所から入力を始める
-    pagesEl.addEventListener('dblclick', () => { if (this.state.mode === 'select' && this.state.sel) this.setMode('input'); });
+    // 記号の上ならその記号を編集（歌詞・コードネーム・文字）
+    pagesEl.addEventListener('dblclick', () => {
+      const st = this.state;
+      if (st.mode !== 'select' || !st.sel) return;
+      if (st.sel.kind === 'mark') this.editMark(); else this.setMode('input');
+    });
     // 右クリック：その場で使えるメニュー
     pagesEl.addEventListener('contextmenu', (e) => {
       e.preventDefault();
-      const h = this.view.hit(this.view.locate(e.clientX, e.clientY));
+      const pt = this.view.locate(e.clientX, e.clientY);
+      const h = this.view.hit(pt);
+      const mk = this.view.hitMark(pt);
+      const near = h && this.view.nearestEvent(h);
+      if (mk && !(near && near.d < 0.6)) return this.markMenu(mk, e);
       if (h) this.contextMenu(h, e);
     });
   }
 
-  // 選択モードでマウスを乗せた音符を色付けし、カーソルの形で「何ができるか」を見せる
-  hoverAt(h) {
+  // 選択モードでマウスを乗せた音符・記号を色付けし、カーソルの形で「何ができるか」を見せる
+  hoverAt(h, pt) {
     const near = h && this.view.nearestEvent(h);
     const sel = this.state.sel;
     const onSel = near && sel?.kind === 'event' && sel.id === near.id;
+    const mk = (!near || near.d > 0.6) && pt ? this.view.hitMark(pt) : null;
+    if (mk) {
+      this.view.hover(sel?.kind === 'mark' && sel.key === mk.key ? null : mk.key);
+      this.view.pagesEl.style.cursor = 'pointer';
+      return;
+    }
     this.view.hover(near && !onSel ? near.id : null);
     this.view.pagesEl.style.cursor = !near ? '' : onSel && !near.g.rest ? 'ns-resize' : 'pointer';
+  }
+
+  // 記号を右クリックしたとき
+  markMenu(mk, e) {
+    const st = this.state;
+    if (st.mode === 'input') this.setMode('select');
+    this.selectMark(mk.key);
+    const isSpan = mk.ref.type === 'span';
+    const items = [{ head: this.markName(mk.ref) }];
+    if (isSpan) items.push(
+      { label: '終わりを1つ右へ', kbd: '→', run: () => this.nudgeMark(1, 'end') },
+      { label: '終わりを1つ左へ', kbd: '←', run: () => this.nudgeMark(-1, 'end') },
+      { label: '始まりを1つ右へ', kbd: 'Shift+→', run: () => this.nudgeMark(1, 'start') },
+      { label: '始まりを1つ左へ', kbd: 'Shift+←', run: () => this.nudgeMark(-1, 'start') }, '-');
+    else items.push({ label: '編集…', kbd: 'Enter', run: () => this.editMark() });
+    items.push({ label: '削除', kbd: 'Delete', run: () => this.deleteMark() });
+    this.dialogs.menu({ x: e.clientX, y: e.clientY }, items);
   }
 
   // 右クリックメニュー（Finale の右クリックと同じ感覚で、よく使う操作をその場で）
@@ -847,7 +1283,7 @@ export class App {
     const near = this.view.nearestEvent(h);
     // 右クリックした所が今の選択に入っていなければ、そこを選び直す
     const inRange = st.sel?.kind === 'range' && h.m >= st.sel.m1 && h.m <= st.sel.m2 && h.r >= st.sel.r1 && h.r <= st.sel.r2;
-    const onSel = near && st.sel?.kind === 'event' && st.sel.id === near.id;
+    const onSel = near && st.sel?.kind === 'event' && (st.sel.id === near.id || (st.sel.to && this.eventSpanIds(st.sel.id, st.sel.to).includes(near.id)));
     if (!inRange && !onSel) {
       if (near) { st.sel = { kind: 'event', id: near.id, noteIndex: near.noteIndex ?? null }; st.voice = near.g.v; }
       else st.sel = { kind: 'range', m1: h.m, m2: h.m, r1: h.r, r2: h.r, a: h.m, ra: h.r };
@@ -873,8 +1309,21 @@ export class App {
       { label: '1オクターブ上げる', kbd: 'Ctrl+↑', run: () => this.shiftPitch('octave', 1) },
       { label: '1オクターブ下げる', kbd: 'Ctrl+↓', run: () => this.shiftPitch('octave', -1) });
     if (isNote) items.push({ label: 'タイ', kbd: 'T', run: () => this.tie() });
-    if (f) items.push({ label: '3連符にする', kbd: 'Ctrl+3', run: () => this.makeTuplet(3) });
+    if (f && !sel.to) items.push({ label: '3連符にする', kbd: 'Ctrl+3', run: () => this.makeTuplet(3) });
     const pt = { x: e.clientX, y: e.clientY };
+    // 記号（Phase 2）
+    items.push('-');
+    if (isNote || sel.kind === 'range') items.push(
+      { label: 'アーティキュレーション…', kbd: '▸', run: () => this.dialogs.marksMenu('art', pt) },
+      { label: '強弱・表情記号…', kbd: 'X', run: () => this.dialogs.marksMenu('expr', pt) },
+      { label: sel.to || sel.kind === 'range' ? 'スラー（選んだ範囲）' : 'スラー（次の音符まで）', kbd: 'S', run: () => this.addSpan('slur') },
+      { label: 'クレッシェンド ／ デクレッシェンド…', kbd: '< >', run: () => this.dialogs.marksMenu('lines', pt) },
+      { label: '歌詞を入力', kbd: 'L', run: () => this.startLyrics() });
+    if (f) items.push({ label: 'コードネームを入力', kbd: 'K', run: () => this.startChords() });
+    if (f && !sel.to) items.push({ label: '装飾音符を付ける', kbd: ';', run: () => { this.setMode('input'); if (!this.state.grace) this.toggleGrace(); } });
+    if (f?.ev.grace) items.push({ label: '装飾音符を消す', run: () => this.edit('装飾音符の削除', () => { delete E.findEvent(this.score, f.ev.id).ev.grace; }) });
+    if (f?.ev.art) items.push({ label: 'アーティキュレーションを全部外す', run: () => this.edit('アーティキュレーション', () => K.clearArtics(this.score, this.selIds())) });
+    items.push({ label: '反復記号・カッコ…', run: () => this.dialogs.repeats() });
     items.push('-', { label: `第${from + 1}小節の設定（拍子・調・音部記号…）`, kbd: '▸', run: () => this.dialogs.measureMenu(pt) });
     this.dialogs.menu(pt, items);
   }
@@ -901,23 +1350,38 @@ export class App {
     const st = this.state;
     const tg = this.resolveInputTarget(h);
     const loc = { p: h.p, s: h.s, m: h.m, v: st.voice, t: tg.t };
-    // 和音モード or Shift：そのタイミングにある音符へ足す
-    if ((st.chord || e.shiftKey) && !st.rest) {
+    const pitch = this.concertOf(h.pitch, h.p); // 記譜音で表示中なら実音にして入れる
+    // 和音モード or Shift：そのタイミングにある音符へ足す（装飾音符モードなら装飾音の和音）
+    if ((st.chord || e.shiftKey) && !st.rest && !st.grace) {
       const at = E.eventAt(this.score, loc);
       if (at && !at.ev.rest) {
         st.lastId = at.ev.id;
-        this.edit('和音に追加', () => E.addToChord(this.score, at.ev.id, h.pitch));
-        st.lastPitch = h.pitch; this.audition([h.pitch]);
+        this.edit('和音に追加', () => E.addToChord(this.score, at.ev.id, pitch));
+        st.lastPitch = pitch; this.audition([pitch]);
         return;
       }
     }
     st.caret = loc;
     if (st.rest) this.enterRest({ at: loc });
-    else this.enterPitch(h.pitch, { at: loc, chord: false });
+    else this.enterPitch(pitch, { at: loc, chord: st.grace && e.shiftKey });
   }
-  tapSelect(h, e) {
+  tapSelect(h, e, pt) {
     const st = this.state;
-    const near = this.view.nearestEvent(h);
+    if (this.textEd) this.closeEditor();
+    const near = h && this.view.nearestEvent(h);
+    // 記号（強弱・スラー・歌詞・コードネームなど）：音符のすぐ近くでなければ記号を選ぶ
+    const mk = pt && this.view.hitMark(pt);
+    if (mk && !(near && near.d < 0.6 && mk.ref.type !== 'lyr')) return this.selectMark(mk.key);
+    if (!h) { st.sel = null; this.refreshOverlays(); this.updateUI(); return; }
+    // Shift+クリックで同じ声部の音符を範囲選択（スラー・松葉・まとめてアーティキュレーション）
+    if (near && e.shiftKey && st.sel?.kind === 'event') {
+      const a = E.findEvent(this.score, st.sel.id), b = E.findEvent(this.score, near.id);
+      if (a && b && a.p === b.p && a.s === b.s && a.v === b.v) {
+        st.sel = { kind: 'event', id: st.sel.id, noteIndex: null, ...(near.id !== st.sel.id ? { to: near.id } : {}) };
+        this.refreshOverlays(); this.updateUI();
+        return;
+      }
+    }
     if (near && !e.shiftKey) {
       st.sel = { kind: 'event', id: near.id, noteIndex: near.noteIndex ?? null };
       st.voice = near.g.v;

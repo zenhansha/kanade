@@ -3,6 +3,9 @@ import { INSTRUMENTS, INST, TEMPLATES, createScore, createPart, fillMeasures, me
 import * as E from '../core/edit.js';
 import { keyNameJa, CLEFS, TPQ, TYPE_TICKS } from '../core/music.js';
 import { storage, canPickFiles } from '../io/storage.js';
+import { ARTICS, DYNAMICS, DYN_ORDER, TEXT_PRESETS, SPANS, JUMPS } from '../core/marks.js';
+import { SMUFL } from '../smufl.js';
+const G = SMUFL.glyphs;
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const TIMES = [[4, 4], [3, 4], [2, 4], [2, 2], [6, 8], [9, 8], [12, 8], [3, 8], [5, 4], [7, 8]];
@@ -37,6 +40,7 @@ export class Dialogs {
     m.innerHTML = items.map((it, i) => it === '-' ? '<hr>' : it.head ? `<div class="mh">${it.head}</div>` : `<button data-i="${i}">${it.label}${it.kbd ? `<kbd>${it.kbd}</kbd>` : ''}</button>`).join('');
     document.body.appendChild(m);
     // anchor はボタン（その下に開く）か {x, y}（右クリックした位置に開く）。下に入らなければ上に開く
+    if (!anchor) { const pal = document.getElementById('palette').getBoundingClientRect(); anchor = { x: Math.max(8, window.innerWidth / 2 - 140), y: pal.top - 4 }; }
     const isEl = !!anchor.getBoundingClientRect;
     const r = isEl ? anchor.getBoundingClientRect() : { left: anchor.x, top: anchor.y, bottom: anchor.y };
     const gap = isEl ? 6 : 2;
@@ -238,6 +242,7 @@ export class Dialogs {
       { label: '選択した小節を削除', run: () => this.deleteMeasures() },
       '-',
       { label: '弱起（アウフタクト）の設定…', run: () => this.pickup() },
+      { label: '反復記号・カッコ・D.S. / Coda…', run: () => this.repeats(m) },
       { label: (a.score.measures[m].sysBreak ? '✓ ' : '') + 'この小節の後で改段', run: () => a.edit('改段', () => { a.score.measures[m].sysBreak = !a.score.measures[m].sysBreak; }) },
       { label: '小節線：' + ({ final: '終止線', double: '複縦線' }[a.score.measures[m].barline] || '通常') + ' → 切り替え', run: () => a.edit('小節線', () => { const ms = a.score.measures[m]; ms.barline = !ms.barline ? 'double' : ms.barline === 'double' ? 'final' : undefined; if (!ms.barline) delete ms.barline; }) },
     ]);
@@ -375,6 +380,111 @@ export class Dialogs {
     });
   }
 
+  // ── 記号のメニュー（パレットの「ほか」「表情」・右クリック・X キー） ──
+  marksMenu(kind, anchor) {
+    const a = this.app;
+    const mg = (g) => `<span class="mg">${G[g].c}</span>`;
+    let items;
+    if (kind === 'art') {
+      items = [{ head: 'アーティキュレーション・装飾記号（選んだ音符に付ける／外す）' }, ...Object.entries(ARTICS).map(([k, x]) => ({
+        label: `${mg(x.side === 'note' || k === 'ferm' || k === 'marc' ? x.g + 'Above' : x.g)}${x.ja}`, kbd: x.key || '', run: () => a.toggleArtic(k),
+      }))];
+    } else if (kind === 'expr') {
+      items = [{ head: '強弱記号' }, ...DYN_ORDER.map(v => ({ label: `${mg(DYNAMICS[v].g)}<span class="ml">${v}</span>`, run: () => a.addDynamic(v) })),
+        '-', { head: '文字の表情記号' }, ...TEXT_PRESETS.map(p => ({ label: `<span class="mt${p.it ? ' it' : ''}">${esc(p.text)}</span><small>${p.pos === 'below' ? '下' : '上'}</small>`, run: () => a.addTextDir(p.text, p.pos, p.it) })),
+        '-', { label: '文字を入力して付ける…', run: () => this.textExpr(null, (d) => a.addTextDir(d.text, d.pos, d.it)) }];
+    } else {
+      items = [{ head: '線の記号（選んだ音符から音符まで）' }, ...Object.entries(SPANS).map(([k, x]) => ({ label: x.ja, kbd: x.key || '', run: () => a.addSpan(k) }))];
+    }
+    this.menu(anchor, items);
+    if (this.menuEl) this.menuEl.classList.add('marks-menu');
+  }
+
+  // 文字の表情記号（dolce・rit. など）を入力・編集
+  textExpr(d, onOk) {
+    const cur = d || { text: '', pos: 'above', it: true };
+    this.open({
+      title: d ? '文字の表情記号を編集' : '文字の表情記号', narrow: true,
+      body: `<label class="field"><span>文字</span><input id="teT" value="${esc(cur.text)}" placeholder="dolce / rit. / pizz. など"></label>
+        <div class="field"><span>置く場所</span><div class="chips" id="teP"><button class="chip${cur.pos !== 'below' ? ' on' : ''}" data-p="above">譜表の上</button><button class="chip${cur.pos === 'below' ? ' on' : ''}" data-p="below">譜表の下（強弱記号の高さ）</button></div></div>
+        <label class="field" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" id="teI" style="width:22px;height:22px"${cur.it !== false ? ' checked' : ''}><span style="font-size:14px;color:var(--text)">斜体（イタリック）</span></label>`,
+      onOpen: (bd) => {
+        bd.querySelector('#teP').onclick = (e) => { const c = e.target.closest('.chip'); if (!c) return; bd.querySelectorAll('#teP .chip').forEach(x => x.classList.toggle('on', x === c)); };
+        setTimeout(() => bd.querySelector('#teT').focus(), 50);
+      },
+      buttons: [{ label: 'キャンセル' }, { label: 'OK', cls: 'primary', onClick: (bd) => {
+        const text = bd.querySelector('#teT').value.trim();
+        if (!text) return false;
+        onOk({ text, pos: bd.querySelector('#teP .chip.on')?.dataset.p || 'above', it: bd.querySelector('#teI').checked });
+      } }],
+    });
+  }
+
+  // 反復記号・カッコ・セーニョ/コーダ・D.C./D.S.（Finale の反復記号ツール）
+  repeats(mi = null) {
+    const a = this.app;
+    const sel = a.state.sel;
+    const m = mi ?? a.targetMeasure();
+    const ms = a.score.measures[m];
+    const range = sel?.kind === 'range' && sel.m2 > sel.m1 && mi == null ? sel : null;
+    const e = ms.ending || null;
+    const chk = (id, on, label) => `<label class="ck"><input type="checkbox" id="${id}"${on ? ' checked' : ''}><span>${label}</span></label>`;
+    this.open({
+      title: `反復記号（第${m + 1}小節）`, narrow: true,
+      body: `${range ? `<button class="btn primary" id="rpRange" style="width:100%;margin-bottom:12px">第${range.m1 + 1}〜${range.m2 + 1}小節をくり返す（|: 〜 :|）</button>` : ''}
+        <div class="rp">
+          ${chk('rpS', ms.repeatStart, '反復の始まり <b>|:</b>（この小節の頭）')}
+          <div class="rp-row">${chk('rpE', ms.repeatEnd, '反復の終わり <b>:|</b>（この小節の終わり）')}
+            <select id="rpT">${[2, 3, 4, 5].map(n => `<option value="${n}"${(ms.repeatEnd?.times || 2) === n ? ' selected' : ''}>${n}回演奏</option>`).join('')}</select></div>
+          <div class="rp-row"><span>カッコ</span><select id="rpN"><option value="">なし</option>${['1', '2', '3', '1,2', '4'].map(n => `<option value="${n}"${e && (e.nums || []).join(',') === n ? ' selected' : ''}>${n.replace(',', '., ')}. 番カッコ</option>`).join('')}</select>
+            <span>長さ</span><input id="rpL" type="number" min="1" max="32" value="${e?.len || 1}" style="width:64px"><span>小節</span></div>
+          <hr>
+          ${chk('rpSeg', ms.segno, 'セーニョ 𝄋（この小節の頭。D.S. で戻る所）')}
+          ${chk('rpCoda', ms.coda, 'コーダ 𝄌（この小節からコーダ）')}
+          ${chk('rpTo', ms.toCoda, 'To Coda（この小節の終わりからコーダへ飛ぶ）')}
+          ${chk('rpFine', ms.fine, 'Fine（D.C./D.S. のあと、この小節で終わる）')}
+          <div class="rp-row"><span>この小節の終わりで</span><select id="rpJ"><option value="">（飛ばない）</option>${Object.entries(JUMPS).map(([k, j]) => `<option value="${k}"${ms.jump === k ? ' selected' : ''}>${j.ja}</option>`).join('')}</select></div>
+        </div>
+        <p style="color:var(--muted);font-size:13px;margin:8px 0 0">再生もこの順番どおりに進みます。</p>`,
+      onOpen: (bd) => {
+        const rb = bd.querySelector('#rpRange');
+        if (rb) rb.onclick = () => {
+          a.edit('反復', () => { a.score.measures[range.m1].repeatStart = true; a.score.measures[range.m2].repeatEnd = { times: 2 }; });
+          this.close();
+          a.toast(`第${range.m1 + 1}〜${range.m2 + 1}小節に反復記号を付けました`);
+        };
+      },
+      buttons: [{ label: 'キャンセル' }, { label: 'OK', cls: 'primary', onClick: (bd) => {
+        const q = (id) => bd.querySelector(id);
+        a.edit('反復記号', () => {
+          const x = a.score.measures[m];
+          const set = (k, v) => { if (v) x[k] = v; else delete x[k]; };
+          set('repeatStart', q('#rpS').checked);
+          set('repeatEnd', q('#rpE').checked ? { times: +q('#rpT').value } : null);
+          const nums = q('#rpN').value;
+          set('ending', nums ? { nums: nums.split(',').map(Number), len: Math.max(1, Math.min(32, +q('#rpL').value || 1)) } : null);
+          set('segno', q('#rpSeg').checked); set('coda', q('#rpCoda').checked);
+          set('toCoda', q('#rpTo').checked); set('fine', q('#rpFine').checked);
+          set('jump', q('#rpJ').value || null);
+        });
+      } }],
+    });
+  }
+
+  // ── 表示メニュー（スコア / パート譜・記譜音） ──
+  viewMenu(anchor) {
+    const a = this.app;
+    const vo = a.viewOpts;
+    this.menu(anchor, [
+      { head: '表示する楽譜' },
+      { label: (vo.part == null ? '✓ ' : '') + 'スコア（全パート）', run: () => a.setView({ part: null }) },
+      ...a.score.parts.map((p, i) => ({ label: (vo.part === i ? '✓ ' : '') + 'パート譜：' + esc(p.name), run: () => a.setView({ part: i }) })),
+      '-',
+      { label: (vo.transposed ? '✓ ' : '') + '移調楽器を記譜音で表示（B♭クラリネットなど）', run: () => { a.setView({ transposed: !vo.transposed }); a.toast(vo.transposed ? '記譜音で表示しています（タップ・音名キーも記譜音で入力）' : '実音（コンサートピッチ）で表示しています'); } },
+      { label: (vo.multiRest ? '✓ ' : '') + 'パート譜で続く休みを1つにまとめる', run: () => a.setView({ multiRest: !vo.multiRest }) },
+    ]);
+  }
+
   // ── スコアメニュー（楽器の追加・削除など） ──
   scoreMenu(anchor) {
     this.menu(anchor, [
@@ -488,6 +598,17 @@ export class Dialogs {
         <h3>直す（選択モード）</h3>
         <p>・音符をタップで選択 → 上下ドラッグ（ペン/マウス）や ↑↓ キーで音高、パレットの音価で長さ、♯♭で臨時記号、削除で休符に。<br>
         ・小節の空いている所をタップで小節を選択。続けて別の小節をタップすると範囲選択（Shift+クリックでも可）。コピー・貼り付け・移調（↑↓）・削除ができます。</p>
+        <h3>記号を付ける（パレットの「記号」タブ）</h3>
+        <p>・<b>アーティキュレーション</b>（スタッカートなど）・<b>強弱記号</b>：音符を選んでボタンを押すと付きます。もう一度押すと外れます。入力モードでは直前に入れた音符に付きます。<br>
+        ・<b>スラー・松葉（cresc. / dim.）・8va・ペダル</b>：最初の音符を選び、<b>Shift+クリック</b>で最後の音符まで選んでから押します（1つだけ選ぶと次の音符まで）。入力モードで押すと、そのあと入れた音符まで伸びていき、もう一度押すと終わります。<br>
+        ・付けた記号はクリックで選べます。<b>←→</b> で線の終わり、<b>Shift+←→</b> で始まりを動かし、<b>Delete</b> で削除、<b>ダブルクリック</b>で編集。<br>
+        ・<b>歌詞</b>（L）：音符を選んで L。入力欄に打って<b>スペース</b>で次の音符へ、<b>-</b> でハイフン、<b>Enter</b> で終わり。日本語入力のままでも使えます（確定後のスペースで次へ）。Ctrl+↓ で2番の歌詞。<br>
+        ・<b>コードネーム</b>（K）：C、Am7、F#m7b5、Bbmaj7/D のように打つと ♯♭ に直して表示します。<br>
+        ・<b>装飾音符</b>（;）：装飾音符モードで入れた音は、カーソルの音符の前に小さく付きます。もう一度 ; で普通の入力へ。<br>
+        ・<b>反復記号</b>：小節を選んで「反復」ボタン（または小節メニュー）。|: :|・1番2番カッコ・セーニョ・コーダ・Fine・D.C./D.S. を付けると、再生もその順番になります。</p>
+        <h3>表示（上のバーの「表示」）</h3>
+        <p>・<b>パート譜</b>：パートを1つ選ぶとそのパートだけの楽譜になり、続く休みの小節は1つにまとまります（リンクパート：スコアと同じデータなので、どちらで直しても両方に反映されます）。<br>
+        ・<b>記譜音で表示</b>：B♭クラリネットやアルトサックスなどを、奏者が読む高さ（調号も）で表示します。画面のタップや音名キーは見えている高さで入り、MIDI キーボードと画面鍵盤は鳴る高さ（実音）で入ります。</p>
         <h3>PC（マウス）で使うとき</h3>
         <p>・<b>ドラッグ</b>で小節の範囲選択、<b>右クリック</b>でその場のメニュー（コピー・移調・拍子や調の変更など）、<b>ダブルクリック</b>でそこから入力。<br>
         ・<b>Ctrl+ホイール</b>で拡大縮小、<b>Ctrl+0</b> で画面に合わせる（大きな画面ではページを横に並べます）。<br>
@@ -505,6 +626,12 @@ export class Dialogs {
           <tr><td>オクターブ上下</td><td>${k('Ctrl')}+${k('↑')}${k('↓')}</td><td>—</td></tr>
           <tr><td>全音階で上下</td><td>${k('Alt')}+${k('↑')}${k('↓')}</td><td>Simple の矢印</td></tr>
           <tr><td>3連符など</td><td>${k('Ctrl')}+${k('3')}（5,6,7 も可）</td><td>Speedy：${k('Ctrl')}+${k('3')}</td></tr>
+          <tr><td>スタッカート／テヌート／アクセント／マルカート／フェルマータ</td><td>${k('Shift')}+${k('S')} ${k('N')} ${k('V')} ${k('O')} ${k('U')}</td><td>アーティキュレーションツール</td></tr>
+          <tr><td>スラー／クレッシェンド／デクレッシェンド</td><td>${k('S')} / ${k('<')} / ${k('>')}</td><td>スマートシェイプ</td></tr>
+          <tr><td>強弱・表情記号のメニュー</td><td>${k('X')}</td><td>発想記号ツール</td></tr>
+          <tr><td>歌詞／コードネーム</td><td>${k('L')} / ${k('K')}</td><td>歌詞ツール／コードツール</td></tr>
+          <tr><td>装飾音符モード</td><td>${k(';')}</td><td>Speedy：${k(';')}</td></tr>
+          <tr><td>選択を広げる（音符）</td><td>${k('Shift')}+${k('←')}${k('→')} / Shift+クリック</td><td>—</td></tr>
           <tr><td>声部（レイヤー）1〜4</td><td>${k('Alt')}+${k('1')}〜${k('4')}</td><td>レイヤー 1〜4</td></tr>
           <tr><td>カーソル移動</td><td>${k('←')} ${k('→')} / 譜表 ${k('Shift')}+${k('↑')}${k('↓')}</td><td>同じ</td></tr>
           <tr><td>入力 ⇄ 選択</td><td>${k('N')} / ${k('Esc')}</td><td>ツールの切り替え</td></tr>

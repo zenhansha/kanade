@@ -5,6 +5,8 @@ import { TPQ, spellMidi, splitSpan, pitchName, midiOf } from '../js/core/music.j
 import { exportMusicXML, importMusicXML } from '../js/io/musicxml.js';
 import { layoutScore } from '../js/engrave/layout.js';
 import { serializeKanade, parseKanade } from '../js/io/kanade.js';
+import * as K from '../js/core/marks.js';
+import { buildPerformance } from '../js/audio/player.js';
 
 let pass = 0, fail = 0;
 const tests = [];
@@ -243,7 +245,8 @@ test('Finale 風の MusicXML を読み込む（弱起・移調楽器・声部・
   eq(s.measures[2].barline, 'final');
   const cl = s.parts[0].staves[0].measures;
   eq(desc(cl[0].voices[0]), 'D5:quarter');           // 記譜 E5 → 実音 D5
-  eq(desc(cl[1].voices[0]), 'D5:quarter.~ D5:eighth C5:quarter'); // 装飾音は今は読み飛ばし
+  eq(desc(cl[1].voices[0]), 'D5:quarter.~ D5:eighth C5:quarter');
+  eq(cl[1].voices[0][0].grace, [{ type: 'eighth', slash: true, notes: [{ step: 'E', alter: 0, octave: 5 }] }]); // 記譜 F♯5 → 実音 E5
   const pr = s.parts[1].staves;
   eq(desc(pr[0].measures[1].voices[0]), 'C5:eighth[3] D5:eighth[3] E5:eighth[3] F5:half');
   eq(desc(pr[0].measures[1].voices[1]), 'A4:half B♭4:quarter');
@@ -278,6 +281,148 @@ test('.kanade でないファイルや新しすぎる版は分かりやすく断
   eq(msg('{"format":"other"}'), 'KANADE のファイルではないようです');
   eq(msg('{"format":"kanade","version":1,"score":{"parts":[],"measures":[]}}'), '楽譜データが壊れています');
   eq(/新しい版/.test(msg('{"format":"kanade","version":99,"score":{}}')), true);
+});
+
+// ───────── Phase 2 ─────────
+function phase2Score() {
+  const s = createScore({ insts: ['voice', 'piano'], measures: 8 });
+  let loc = { p: 0, s: 0, m: 0, v: 0, t: 0 };
+  const ids = [];
+  for (const p of [C4, D4, E4, F4, G4, A4, G4, F4]) { const r = E.enterNote(s, loc, { type: 'quarter', pitches: [p] }); loc = r.next; ids.push(r.ids[0]); }
+  return { s, ids };
+}
+const F4 = { step: 'F', alter: 0, octave: 4 }, G4 = { step: 'G', alter: 0, octave: 4 }, A4 = { step: 'A', alter: 0, octave: 4 };
+
+test('アーティキュレーション：付け外し・音価を変えても残る・休符にはフェルマータだけ', () => {
+  const { s, ids } = phase2Score();
+  eq(K.toggleArtic(s, [ids[0], ids[1]], 'stacc'), true);
+  eq(K.toggleArtic(s, [ids[0], ids[1]], 'stacc'), false);
+  K.toggleArtic(s, [ids[0]], 'acc'); K.toggleArtic(s, [ids[0]], 'marc');
+  eq(E.findEvent(s, ids[0]).ev.art, ['marc']); // アクセントとマルカートは同時に付けない
+  K.setLyric(s, ids[0], 0, 'ラ');
+  const r = E.setDuration(s, ids[0], 'half', 0);
+  const ev = E.findEvent(s, r.ids[0]).ev;
+  eq([ev.art, ev.lyr], [['marc'], [{ t: 'ラ' }]]);
+  K.toggleArtic(s, [r.ids[0]], 'ferm');
+  E.toRest(s, r.ids[0]);
+  eq(E.findEvent(s, r.ids[0]).ev.art, ['ferm']);
+});
+
+test('線（スラーなど）は小節の挿入・削除・コピーでずれない', () => {
+  const { s } = phase2Score();
+  K.addSpan(s, 0, 0, 0, { m: 0, t: TPQ }, { m: 1, t: TPQ * 2 }, 'slur');
+  K.addDir(s, 0, 0, 1, { t: 0, k: 'dyn', v: 'f' });
+  E.appendMeasures(s, 2, 1); // 1小節目の後ろに2小節
+  let sp = s.parts[0].staves[0].measures[0].spans[0];
+  eq([sp.dm, sp.t2], [3, TPQ * 2]);
+  eq(s.parts[0].staves[0].measures[3].dirs[0].v, 'f');
+  E.deleteMeasures(s, 1, 2);
+  sp = s.parts[0].staves[0].measures[0].spans[0];
+  eq(sp.dm, 1);
+  const clip = E.copyRange(s, { m1: 0, m2: 1, staves: [[0, 0]] });
+  E.pasteRange(s, clip, { m: 4, staves: [[0, 0]] });
+  eq(s.parts[0].staves[0].measures[4].spans[0], { k: 'slur', v: 0, t: TPQ, dm: 1, t2: TPQ * 2 });
+  // 終わりを1音ずつ動かす
+  K.nudgeSpan(s, 0, 0, 0, 0, 'end', 1);
+  eq(s.parts[0].staves[0].measures[0].spans[0].t2, TPQ * 3);
+});
+
+test('反復記号の演奏順（|: :| ・1番2番カッコ・D.S. al Coda）', () => {
+  const s = createScore({ measures: 8 });
+  const M = s.measures;
+  M[1].repeatStart = true; M[2].ending = { nums: [1], len: 1 }; M[2].repeatEnd = { times: 2 }; M[3].ending = { nums: [2], len: 1 };
+  M[4].segno = true; M[5].toCoda = true; M[6].jump = 'dsCoda'; M[7].coda = true;
+  eq(K.playOrder(s), [0, 1, 2, 1, 3, 4, 5, 6, 4, 5, 7]);
+  const s2 = createScore({ measures: 4 });
+  s2.measures[0].repeatStart = true; s2.measures[1].repeatEnd = { times: 3 }; s2.measures[2].fine = true; s2.measures[3].jump = 'dcFine';
+  eq(K.playOrder(s2), [0, 1, 0, 1, 0, 1, 2, 3, 0, 1, 2]);
+});
+
+test('Phase 2 の記号が MusicXML の書き出し → 読み込みで残る', () => {
+  const { s, ids } = phase2Score();
+  K.toggleArtic(s, [ids[0]], 'stacc'); K.toggleArtic(s, [ids[1]], 'ten'); K.toggleArtic(s, [ids[2]], 'ferm'); K.toggleArtic(s, [ids[3]], 'tr');
+  K.setLyric(s, ids[0], 0, 'Hal', true); K.setLyric(s, ids[1], 0, 'le'); K.setLyric(s, ids[1], 1, 'two');
+  K.addDir(s, 0, 0, 0, { t: 0, k: 'dyn', v: 'mp' });
+  K.addDir(s, 0, 0, 0, { t: TPQ, k: 'chord', text: 'Bbm7/Db' });
+  K.addDir(s, 0, 0, 1, { t: 0, k: 'text', text: 'dolce', pos: 'above', it: true });
+  K.addSpan(s, 0, 0, 0, { m: 0, t: 0 }, { m: 0, t: TPQ * 2 }, 'slur');
+  K.addSpan(s, 0, 0, 0, { m: 1, t: 0 }, { m: 1, t: TPQ * 3 }, 'cresc');
+  K.addSpan(s, 0, 0, 0, { m: 0, t: TPQ * 3 }, { m: 1, t: TPQ }, '8va');
+  K.addSpan(s, 1, 1, 0, { m: 0, t: 0 }, { m: 1, t: 0 }, 'ped');
+  K.addGrace(s, { p: 0, s: 0, m: 1, v: 0, t: TPQ }, { step: 'B', alter: -1, octave: 4 }, { type: 'eighth', slash: true });
+  s.measures[2].repeatStart = true; s.measures[3].repeatEnd = { times: 2 }; s.measures[3].ending = { nums: [1], len: 1 }; s.measures[4].ending = { nums: [2], len: 1 };
+  s.measures[5].segno = true; s.measures[6].fine = true; s.measures[7].jump = 'dsFine';
+  const back = importMusicXML(exportMusicXML(s));
+  const v0 = (m) => back.parts[0].staves[0].measures[m].voices[0];
+  eq(v0(0).map(e => e.art || null), [['stacc'], ['ten'], ['ferm'], ['tr']]);
+  eq([v0(0)[0].lyr, v0(0)[1].lyr], [[{ t: 'Hal', h: true }], [{ t: 'le' }, { t: 'two' }]]);
+  eq(back.parts[0].staves[0].measures[0].dirs, [{ t: 0, k: 'dyn', v: 'mp' }, { t: TPQ, k: 'chord', text: 'Bbm7/Db' }]);
+  eq(back.parts[0].staves[0].measures[1].dirs, [{ t: 0, k: 'text', text: 'dolce', pos: 'above', it: true }]);
+  const spans = (p, st, m) => back.parts[p].staves[st].measures[m].spans || [];
+  eq(spans(0, 0, 0).map(x => [x.k, x.t, x.dm, x.t2]).sort(), [['8va', TPQ * 3, 1, TPQ], ['slur', 0, 0, TPQ * 2]]);
+  eq(spans(0, 0, 1).map(x => [x.k, x.t, x.dm, x.t2]), [['cresc', 0, 0, TPQ * 3]]);
+  eq(spans(1, 1, 0).map(x => x.k), ['ped']);
+  eq(v0(1)[1].grace, [{ type: 'eighth', slash: true, notes: [{ step: 'B', alter: -1, octave: 4 }] }]);
+  const M = back.measures;
+  eq([M[2].repeatStart, M[3].repeatEnd, M[3].ending, M[4].ending, M[5].segno, M[6].fine, M[7].jump], [true, { times: 2 }, { nums: [1], len: 1 }, { nums: [2], len: 1 }, true, true, 'dsFine']);
+  eq(K.playOrder(back), K.playOrder(s));
+});
+
+test('移調楽器を記譜音で表示（B♭クラリネットは長2度上・♯2つ）', () => {
+  const s = createScore({ insts: ['clarinet', 'flute'], measures: 2, fifths: -2 }); // 実音 変ロ長調
+  E.enterNote(s, { p: 0, s: 0, m: 0, v: 0, t: 0 }, { type: 'quarter', pitches: [{ step: 'B', alter: -1, octave: 4 }] });
+  const L = layoutScore(s, { transposed: true });
+  eq([L.fifthsAt(0, 0), L.fifthsAt(1, 0)], [0, -2]); // クラリネットはハ長調、フルートはそのまま
+  const w = K.writtenScore(s);
+  eq(pitchName(w.parts[0].staves[0].measures[0].voices[0][0].notes[0]), 'C5');
+  eq(pitchName(K.toConcert({ step: 'C', alter: 0, octave: 5 }, K.partTrans(s.parts[0]))), 'B♭4');
+  eq(s.parts[0].staves[0].measures[0].voices[0][0].notes[0].step, 'B'); // 元の楽譜は変わらない
+});
+
+test('パート譜：1パートだけを表示し、続く休みの小節を1つにまとめる', () => {
+  const s = createScore({ insts: ['flute', 'piano'], measures: 12 });
+  E.enterNote(s, { p: 0, s: 0, m: 0, v: 0, t: 0 }, { type: 'whole', pitches: [C4] });
+  E.enterNote(s, { p: 0, s: 0, m: 9, v: 0, t: 0 }, { type: 'whole', pitches: [C4] });
+  const L = layoutScore(s, { parts: [0] });
+  eq(L.rows, [{ p: 0, s: 0 }]);
+  const g = L.measures[3].grp;
+  eq([g.first, g.last, g.count], [1, 8, 8]);
+  eq(L.measures[11].grp ? [L.measures[10].grp.first, L.measures[11].grp.last] : null, [10, 11]);
+  const L2 = layoutScore(s, { parts: [0], multiRest: false });
+  eq(L2.measures.some(m => m.grp), false);
+});
+
+test('再生：強弱・スタッカート・8va・装飾音・反復が音に反映される', () => {
+  const { s, ids } = phase2Score();
+  K.addDir(s, 0, 0, 0, { t: 0, k: 'dyn', v: 'pp' });
+  K.addDir(s, 0, 0, 1, { t: 0, k: 'dyn', v: 'ff' });
+  K.toggleArtic(s, [ids[1]], 'stacc');
+  K.addSpan(s, 0, 0, 0, { m: 0, t: TPQ * 2 }, { m: 0, t: TPQ * 2 }, '8va');
+  K.addGrace(s, { p: 0, s: 0, m: 0, v: 0, t: TPQ * 3 }, D4, {});
+  s.measures[0].repeatEnd = { times: 2 };
+  const perf = buildPerformance(s);
+  const voice = perf.notes.filter(n => n.p === 0);
+  const first = voice.filter(n => n.id === ids[0]);
+  eq(first.length, 2); // 反復で2回
+  eq(+first[0].vel.toFixed(2), 0.32);
+  const st = voice.find(n => n.id === ids[1]), nor = voice.find(n => n.id === ids[0]);
+  eq(st.end - st.start < (nor.end - nor.start) * 0.6, true);
+  eq(voice.find(n => n.id === ids[2]).midi, 64 + 12); // E4 → 8va で E5
+  const gr = voice.filter(n => n.id === ids[3]);
+  eq(gr[0].midi === 62 && gr[0].start < gr[1].start, true); // 装飾音 D4 が先
+  eq(+voice.find(n => n.id === ids[4]).vel.toFixed(2), 0.9);
+});
+
+test('浄書：記号の位置が返り、強弱・歌詞・反復を描いてもページに収まる', () => {
+  const { s, ids } = phase2Score();
+  K.setLyric(s, ids[0], 0, 'さ');
+  K.addDir(s, 0, 0, 0, { t: 0, k: 'dyn', v: 'f' });
+  K.addSpan(s, 0, 0, 0, { m: 0, t: 0 }, { m: 1, t: 0 }, 'slur');
+  s.measures[2].repeatStart = true; s.measures[3].repeatEnd = { times: 2 };
+  const L = layoutScore(s);
+  eq(L.marks.map(m => m.key.split(':')[0]).sort(), ['d', 'l', 's']);
+  eq(L.pages.length, 1);
+  eq(/<path class="slur"/.test(L.pages[0].svg), true);
 });
 
 function makeZip(files, zlib) {

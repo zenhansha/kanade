@@ -6,6 +6,17 @@ import { fromDiatonic, keyAlter } from '../core/music.js';
 
 const G = SMUFL.glyphs;
 const MM_PX = 96 / 25.4;
+// スラーの曲線（3次ベジェ）の近くか
+function nearCurve(c, x, y) {
+  const w = c.xb - c.xa;
+  for (let i = 0; i <= 24; i++) {
+    const u = i / 24, v = 1 - u;
+    const cx = v * v * v * c.xa + 3 * v * v * u * (c.xa + w * 0.22) + 3 * v * u * u * (c.xb - w * 0.22) + u * u * u * c.xb;
+    const cy = v * v * v * c.ya + 3 * v * v * u * (c.ya + c.h) + 3 * v * u * u * (c.yb + c.h) + u * u * u * c.yb;
+    if (Math.hypot(cx - x, cy - y) < 0.9) return true;
+  }
+  return false;
+}
 const PAGE_GAP = 28; // ページどうしの間隔（css の #pages の gap と同じ）
 
 export class ScoreView {
@@ -116,7 +127,8 @@ export class ScoreView {
     const clef = clefInfo(L.clefs[m][best.r]);
     const pos = Math.round((best.staffY + 2 - pt.y) * 2);
     const dn = clef.mid + pos;
-    const fifths = L.attrs[m].fifths;
+    // 記譜音表示のときは、その譜表に見えている調号で読む
+    const fifths = L.fifthsAt ? L.fifthsAt(best.r, m) : L.attrs[m].fifths;
     const p0 = fromDiatonic(dn);
     const pitch = { ...p0, alter: keyAlter(fifths, p0.step) };
     return { ...best, m, p: row.p, s: row.s, pos, pitch, x: pt.x, y: pt.y, page: pt.page };
@@ -142,6 +154,62 @@ export class ScoreView {
       best.noteIndex = best.g.notes[ni].k;
     } else if (best && !best.g.rest) best.noteIndex = best.g.notes[0].k;
     return best;
+  }
+
+  // クリックした所にある記号（強弱・スラー・歌詞・コードネーム・反復記号など）。音符のすぐ近くなら音符を優先する
+  hitMark(pt) {
+    const L = this.L;
+    if (!L || !pt || !L.marks) return null;
+    let best = null;
+    for (const mk of L.marks) {
+      if (mk.page !== pt.page) continue;
+      const y = pt.y - mk.oy;
+      if (pt.x < mk.x0 || pt.x > mk.x1 || y < mk.y0 || y > mk.y1) continue;
+      if (mk.curve && !nearCurve(mk.curve, pt.x, y)) continue;
+      const area = (mk.x1 - mk.x0) * (mk.y1 - mk.y0);
+      if (!best || area < best.area) best = { mk, area };
+    }
+    return best ? best.mk : null;
+  }
+
+  // 楽譜の上に重ねる文字入力欄（歌詞・コードネーム）。描き直しても消えないように、ページの外（スクロール領域）に置く
+  showEditor({ page, x, y, value = '', label = '', align = 'center', onKey, onInput }) {
+    const w = this.wraps[page];
+    if (!w) return null;
+    let box = this.editorEl;
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'inl';
+      box.innerHTML = '<span class="inl-l"></span><input type="text" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="next">';
+      this.scroller.appendChild(box);
+      this.editorEl = box;
+      const inp = box.querySelector('input');
+      inp.addEventListener('keydown', (e) => this.editorKey && this.editorKey(e, inp));
+      inp.addEventListener('input', (e) => this.editorInput && this.editorInput(e, inp));
+      inp.addEventListener('blur', () => setTimeout(() => { if (this.editorEl === box && document.activeElement !== inp && this.editorBlur) this.editorBlur(inp); }, 150));
+    }
+    this.editorKey = onKey; this.editorInput = onInput;
+    const sp = this.spPx;
+    const sc = this.scroller;
+    const wr = w.getBoundingClientRect(), sr = sc.getBoundingClientRect();
+    const px = wr.left - sr.left + sc.scrollLeft + x * sp, py = wr.top - sr.top + sc.scrollTop + y * sp;
+    box.hidden = false;
+    box.dataset.align = align;
+    box.style.left = px + 'px';
+    box.style.top = py + 'px';
+    box.querySelector('.inl-l').textContent = label;
+    const inp = box.querySelector('input');
+    inp.value = value;
+    inp.style.fontSize = Math.max(14, Math.min(26, 2.3 * sp)) + 'px';
+    inp.focus({ preventScroll: true });
+    inp.select();
+    return inp;
+  }
+  hideEditor() {
+    if (!this.editorEl) return;
+    const el = this.editorEl;
+    this.editorEl = null; this.editorKey = null; this.editorInput = null;
+    el.remove();
   }
 
   // 小節内のどのタイミングに入れるか（オンセット・音価の格子から一番近いもの）

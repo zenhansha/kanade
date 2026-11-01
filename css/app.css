@@ -107,7 +107,9 @@ svg.page .t { font-family: "Times New Roman", "Hiragino Mincho ProN", "Yu Mincho
 svg.page .title { font-weight: 600; }
 svg.page .mnum, svg.page .tempo-t { font-style: italic; }
 svg.page .tempo-t { font-weight: 600; }
-svg.page polygon.beam, svg.page path.tie { stroke: none; }
+svg.page polygon.beam, svg.page path.tie, svg.page path.slur { stroke: none; }
+svg.page .gg { font-size: 2.48px; }
+svg.page .mk { cursor: pointer; }
 svg.page .ev, svg.page .beamgrp, svg.page .tuplet { transition: fill .08s; }
 body.color-voices svg.page .v1 { fill: var(--v1); stroke: var(--v1); }
 body.color-voices svg.page .v2 { fill: var(--v2); stroke: var(--v2); }
@@ -115,6 +117,7 @@ body.color-voices svg.page .v3 { fill: var(--v3); stroke: var(--v3); }
 svg.page .hov, svg.page .hov * { fill: #6a86d8 !important; stroke: #6a86d8 !important; }
 svg.page .sel, svg.page .sel * { fill: var(--accent) !important; stroke: var(--accent) !important; }
 svg.page .sel-note { fill: var(--input) !important; }
+svg.page .sel .hair, svg.page .sel .ending, svg.page .hov .hair, svg.page .hov .ending { fill: none !important; }
 svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e8590c !important; }
 
 /* 重ねて表示するもの（カーソル・ゴースト音符・範囲選択・再生位置） */
@@ -140,7 +143,7 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
 .pg { display: flex; align-items: center; gap: 3px; padding: 0 4px; flex: none; }
 .pg + .pg { border-left: 1px solid var(--line); padding-left: 8px; }
 .pb {
-  width: 50px; height: 50px; border-radius: 10px; border: 1px solid transparent; background: var(--chrome-2);
+  width: 46px; height: 50px; border-radius: 10px; border: 1px solid transparent; background: var(--chrome-2);
   display: inline-flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; flex: none; position: relative;
   box-shadow: 0 1px 0 var(--line);
 }
@@ -162,7 +165,7 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
 .mode-switch button.on.sel { background: var(--accent); color: var(--accent-ink); }
 .mode-switch button.on.inp { background: var(--input); color: #fff; }
 .voices { display: flex; gap: 3px; }
-.voices .pb { width: 36px; }
+.voices .pb { width: 34px; }
 .voices .pb .tx { font-size: 14px; }
 .voices .pb[data-v="1"].on { background: var(--v1); border-color: var(--v1); }
 .voices .pb[data-v="2"].on { background: var(--v2); border-color: var(--v2); }
@@ -238,6 +241,32 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
 
 @media (max-width: 900px) { .tb span:not(.dot):not(.note-glyph) { display: none; } .tb.zl { display: none; } #btnTempo span#tempoLabel { display: inline; } }
 
+/* ── Phase 2：パレットのタブ（音符 / 記号）・記号メニュー・歌詞やコードの入力欄・反復ダイアログ ── */
+.pal-tabs { display: flex; flex-direction: column; gap: 3px; flex: none; }
+.pal-tabs button { height: 23px; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--chrome-2); font-size: 12px; font-weight: 650; cursor: pointer; }
+.pal-tabs button.on { background: var(--text); color: var(--chrome); border-color: var(--text); }
+#palette[data-page="notes"] .pm, #palette[data-page="marks"] .pn { display: none; }
+.pb sup { line-height: 0; }
+.pb .tx sup { font-weight: 600; }
+.tb#btnView.on { background: var(--accent-soft); color: var(--accent); }
+.menu .mg { font-family: Bravura; font-size: 26px; line-height: 0; display: inline-block; width: 34px; text-align: center; transform: translateY(5px); }
+.menu .ml { font-size: 12px; color: var(--muted); }
+.menu .mt { font-family: "Times New Roman", "Yu Mincho", serif; font-size: 16px; }
+.menu .mt.it { font-style: italic; }
+.menu small { color: var(--muted); font-size: 11px; }
+.menu.marks-menu button { justify-content: flex-start; gap: 10px; }
+.menu.marks-menu button kbd { margin-left: auto; }
+.inl { position: absolute; z-index: 5; display: flex; align-items: center; gap: 6px; transform: translate(-50%, -78%); background: var(--chrome); border: 2px solid var(--input); border-radius: 9px; padding: 3px 4px 3px 8px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+.inl[data-align="left"] { transform: translate(-10px, -78%); }
+.inl .inl-l { font-size: 11px; font-weight: 700; color: var(--input); white-space: nowrap; }
+.inl input { border: 0; outline: none; background: transparent; min-width: 90px; width: 9em; font-family: "Times New Roman", "Hiragino Mincho ProN", "Yu Mincho", serif; padding: 2px 4px; }
+.rp { display: flex; flex-direction: column; gap: 9px; }
+.rp hr { border: 0; border-top: 1px solid var(--line); margin: 2px 0; width: 100%; }
+.ck { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+.ck input { width: 20px; height: 20px; flex: none; }
+.rp-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; }
+.rp-row select, .rp-row input[type="number"] { height: 34px; border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; background: var(--chrome-2); }
+
 /* ── PC（マウス操作）：指で押さなくていいぶんボタンを少し小さくして、楽譜を広く見せる ── */
 @media (hover: hover) and (pointer: fine) {
   :root { --tb-h: 46px; --pal-h: 54px; }
@@ -250,6 +279,7 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
   .pb .cap { font-size: 9px; }
   .voices .pb { width: 32px; }
   .mode-switch button { height: 36px; padding: 0 12px; }
+  .pal-tabs button { height: 19px; font-size: 11px; }
   #palette { padding: 5px 8px; }
   .menu button { padding: 8px 12px; font-size: 14px; }
   .menu { min-width: 230px; }
@@ -259,7 +289,7 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
 @media print {
   @page { size: A4; margin: 0; }
   html, body { background: #fff; height: auto; }
-  #topbar, #palette, #piano, #statusbar, #toast, #modalRoot, .ov { display: none !important; }
+  #topbar, #palette, #piano, #statusbar, #toast, #modalRoot, .ov, .inl { display: none !important; }
   #app { position: static; padding: 0; }
   #scroller { overflow: visible; }
   #pages { display: block; padding: 0; gap: 0; transform: none !important; }

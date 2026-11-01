@@ -16,7 +16,9 @@ dynamicPPP dynamicPP dynamicMP dynamicMF dynamicFF dynamicFFF dynamicSforzato dy
 tuplet0 tuplet1 tuplet2 tuplet3 tuplet4 tuplet5 tuplet6 tuplet7 tuplet8 tuplet9 tupletColon
 metNoteWhole metNoteHalfUp metNoteQuarterUp metNote8thUp metNote16thUp metNote32ndUp metNote64thUp metNoteDoubleWhole metAugmentationDot
 repeatDot segno coda keyboardPedalPed keyboardPedalUp
-graceNoteAcciaccaturaStemUp graceNoteAcciaccaturaStemDown`.split(/\s+/);
+graceNoteAcciaccaturaStemUp graceNoteAcciaccaturaStemDown
+ottavaAlta ottavaBassaVb quindicesimaAlta quindicesimaBassa ornamentTrill ornamentMordent ornamentShortTrill ornamentTurn wiggleTrill
+breathMarkComma caesura stringsUpBow stringsDownBow dynamicSforzandoPiano dynamicRinforzando2 csymAccidentalFlat csymAccidentalSharp`.split(/\s+/);
 const out = { defaults: meta.engravingDefaults, glyphs: {} };
 for (const n of want) {
   if (!names[n]) { console.error('missing', n); continue; }

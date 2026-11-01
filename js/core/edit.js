@@ -7,6 +7,7 @@
 // 位置は loc = { p: パート, s: 譜表, m: 小節, v: 声部(0〜3), t: 小節内ティック } で表す。
 import { dottedTicks, splitSpan, diatonic, transposeSemis, midiOf, measureTicks } from './music.js';
 import { evTicks, measureRest, newId, measureAttrs, fillMeasures } from './score.js';
+import { shiftSpansForInsert, shiftSpansForDelete } from './marks.js';
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
 
@@ -92,6 +93,9 @@ export function replaceSpan(score, A, p, s, m, v, t, newEvs) {
       a = Math.min(a, grp[0].start); b = Math.max(b, grp[grp.length - 1].end);
     }
   }
+  // その位置にあった音符の装飾音は、上書きした新しい音符へ引き継ぐ（装飾音 → 本音符の順に入力できるように）
+  const graceFrom = pos.find(x => x.start === t && x.ev.grace);
+  if (graceFrom && newEvs[0] && !newEvs[0].grace) newEvs[0].grace = graceFrom.ev.grace;
   const before = [], after = [];
   let tail = [];
   for (const x of pos) {
@@ -106,12 +110,21 @@ export function replaceSpan(score, A, p, s, m, v, t, newEvs) {
   normalizeVoice(score, A, p, s, m, v);
 }
 
+// 小節全体の休符を、拍にそろった普通の休符に分ける（装飾音など「その位置の音符」が必要なとき）
+export function expandMeasureRest(score, p, s, m, v) {
+  const voice = getVoice(score, p, s, m, v, true);
+  if (!voice || voice.length !== 1 || !voice[0].mr) return false;
+  const attr = measureAttrs(score)[m];
+  staffMeasure(score, p, s, m).voices[v] = splitSpan(0, attr.len, attr.time, attr.full - attr.len).map(x => ({ id: newId(), rest: true, type: x.type, dots: x.dots, notes: [] }));
+  return true;
+}
+
 // 休符だけになった声部を整理（声部1は全休符に、声部2〜4は消す）
 export function normalizeVoice(score, A, p, s, m, v) {
   const sm = staffMeasure(score, p, s, m);
   const voice = sm.voices[v];
   if (!voice) return;
-  if (voice.every(e => e.rest && !e.tuplet)) {
+  if (voice.every(e => e.rest && !e.tuplet && !e.grace && !e.art)) {
     if (v === 0) sm.voices[0] = [measureRest(A[m].len)];
     else sm.voices[v] = null;
   }
@@ -122,6 +135,7 @@ export function appendMeasures(score, count = 1, at = score.measures.length) {
   const last = score.measures[score.measures.length - 1];
   const finalBar = last && last.barline === 'final';
   if (finalBar && at === score.measures.length) delete last.barline;
+  shiftSpansForInsert(score, at, count);
   for (let i = 0; i < count; i++) {
     score.measures.splice(at, 0, {});
     for (const part of score.parts) for (const st of part.staves) st.measures.splice(at, 0, null);
@@ -137,6 +151,7 @@ export function deleteMeasures(score, from, to) {
   const carry = {};
   for (let i = from; i <= to; i++) for (const k of ['time', 'key', 'tempo']) if (score.measures[i][k]) carry[k] = score.measures[i][k];
   const finalBar = score.measures[n - 1].barline === 'final';
+  shiftSpansForDelete(score, from, to);
   score.measures.splice(from, to - from + 1);
   for (const part of score.parts) for (const st of part.staves) {
     let clef = null;
@@ -304,6 +319,9 @@ export function toRest(score, id) {
   const pv = prevEvent(score, f);
   if (pv && !pv.ev.rest) pv.ev.notes.forEach(n => (n.tie = false));
   f.ev.rest = true; f.ev.notes = [];
+  // 休符に残せるのはフェルマータだけ
+  if (f.ev.art) { f.ev.art = f.ev.art.filter(k => k === 'ferm'); if (!f.ev.art.length) delete f.ev.art; }
+  delete f.ev.lyr; delete f.ev.grace;
   normalizeVoice(score, measureAttrs(score), f.p, f.s, f.m, f.v);
   return f;
 }
@@ -323,11 +341,15 @@ export function setDuration(score, id, type, dots) {
   if (!f || f.ev.tuplet) return null;
   const pitches = f.ev.rest ? null : f.ev.notes.map(n => ({ step: n.step, alter: n.alter, octave: n.octave }));
   const tieOut = !f.ev.rest && f.ev.notes.every(n => n.tie);
+  const keep = { art: f.ev.art, lyr: f.ev.lyr, grace: f.ev.grace };
   const r = enterNote(score, { p: f.p, s: f.s, m: f.m, v: f.v, t: f.t }, { type, dots, pitches });
   if (tieOut && r.ids.length) {
     const last = findEvent(score, r.ids[r.ids.length - 1]);
     if (last && !last.ev.rest) last.ev.notes.forEach(n => (n.tie = true));
   }
+  // アーティキュレーション・歌詞・装飾音は長さを変えても残す
+  const first = r.ids.length && findEvent(score, r.ids[0]);
+  if (first) for (const k in keep) if (keep[k]) first.ev[k] = keep[k];
   return r;
 }
 
@@ -390,7 +412,7 @@ export function clearRange(score, range) {
   const A = measureAttrs(score);
   for (const [p, s] of range.staves) for (let m = range.m1; m <= range.m2; m++) {
     const sm = staffMeasure(score, p, s, m);
-    if (sm) sm.voices = [[measureRest(A[m].len)]];
+    if (sm) { sm.voices = [[measureRest(A[m].len)]]; delete sm.dirs; delete sm.spans; }
   }
 }
 export function copyRange(score, range) {

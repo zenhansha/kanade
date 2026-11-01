@@ -142,6 +142,22 @@ export function transposeSemis(p, semis, fifths = 0) {
   return spellMidi(m, semis > 0 ? Math.max(fifths, 1) : Math.min(fifths, -1));
 }
 
+// 音程で移調（dia = 全音階で何度ずらすか、chrom = 半音数）。綴りは音程どおりに保つ（長2度上なら B♭ → C）
+export function transposeInterval(p, dia, chrom) {
+  if (!dia && !chrom) return { ...p };
+  const q = fromDiatonic(diatonic(p) + dia);
+  q.alter = midiOf(p) + chrom - midiOf({ ...q, alter: 0 });
+  if (Math.abs(q.alter) > 2) return spellMidi(midiOf(p) + chrom, 0);
+  return q;
+}
+
+// 調号を移調したときの5度圏の差（半音 chrom 上げると ♯ がいくつ増えるか）。例：+2半音（長2度）→ +2
+export function fifthsForSemis(chrom) {
+  let f = ((((chrom * 7) % 12) + 12) % 12);
+  if (f > 6) f -= 12;
+  return f;
+}
+
 export function pitchName(p) {
   const acc = { '-2': '𝄫', '-1': '♭', 0: '', 1: '♯', 2: '𝄪' }[p.alter || 0];
   return `${p.step}${acc}${p.octave}`;

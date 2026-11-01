@@ -43,6 +43,27 @@ export function bindKeys(app) {
     if (e.altKey && /^Digit[1-4]$/.test(code)) { handled(); return app.setVoice(+code.slice(5) - 1); }
     if (e.altKey && (k === 'ArrowUp' || k === 'ArrowDown')) { handled(); return app.shiftPitch('step', k === 'ArrowUp' ? 1 : -1); }
 
+    // ── 記号（Phase 2）。アーティキュレーションは Shift+文字（MuseScore と同じ）、線は S・<・> ──
+    if (e.shiftKey && !e.altKey) {
+      const art = { KeyS: 'stacc', KeyN: 'ten', KeyV: 'acc', KeyO: 'marc', KeyU: 'ferm' }[code];
+      if (art) { handled(); return app.toggleArtic(art); }
+    }
+    if (!e.altKey && !e.shiftKey) {
+      if (code === 'KeyS') { handled(); return app.addSpan('slur'); }
+      if (code === 'KeyL') { handled(); return app.startLyrics(); }
+      if (code === 'KeyK') { handled(); return app.startChords(); }
+      if (code === 'KeyX') { handled(); return app.dialogs.marksMenu('expr', null); }
+    }
+    if (k === '<') { handled(); return app.addSpan('cresc'); }
+    if (k === '>') { handled(); return app.addSpan('dim'); }
+    if (k === ';') { handled(); return app.toggleGrace(); }
+    const sel = app.state.sel;
+    if (app.state.mode === 'select' && sel?.kind === 'mark') {
+      if (k === 'ArrowRight' || k === 'ArrowLeft') { handled(); return app.nudgeMark(k === 'ArrowRight' ? 1 : -1, e.shiftKey ? 'start' : 'end'); }
+      if (k === 'Enter') { handled(); return app.editMark(); }
+    }
+    if (app.state.mode === 'select' && sel?.kind === 'event' && e.shiftKey && (k === 'ArrowRight' || k === 'ArrowLeft')) { handled(); return app.extendSel(k === 'ArrowRight' ? 1 : -1); }
+
     // 音名 A〜G（Shift で和音）
     if (/^Key[A-G]$/.test(code) && !e.altKey) {
       handled();
