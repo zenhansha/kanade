@@ -28,11 +28,13 @@
     <button class="tb icon" id="btnRedo" title="やり直し（Ctrl+Y）"><svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
     <div class="sep"></div>
     <button class="tb icon" id="btnRewind" title="先頭へ"><svg viewBox="0 0 24 24"><path d="M6 5v14"/><path d="m18 5-9 7 9 7z" class="fill"/></svg></button>
+    <button class="tb icon rec" id="btnRec" title="リアルタイム入力（HyperScribe）"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5" class="fill"/></svg></button>
     <button class="tb icon play" id="btnPlay" title="再生／停止（スペース）"><svg viewBox="0 0 24 24" class="i-play"><path d="M7 4v16l13-8z" class="fill"/></svg><svg viewBox="0 0 24 24" class="i-stop"><rect x="6" y="6" width="12" height="12" rx="1.5" class="fill"/></svg></button>
     <button class="tb" id="btnTempo" title="テンポ"><span class="note-glyph"></span><span id="tempoLabel">= 100</span></button>
     <div class="sep"></div>
     <button class="tb" id="btnMeasure" title="小節・拍子・調・音部記号"><svg viewBox="0 0 24 24"><path d="M3 6h18M3 10h18M3 14h18M3 18h18M8 4v16M17 4v16"/></svg><span>小節</span></button>
     <button class="tb" id="btnScore" title="楽器・スコア設定"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-2.7 1.1V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-2.7-1.1l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.6 1.6 0 0 0 3.6 15H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.1-2.7l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.6 1.6 0 0 0 9.7 4.4V4a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 2.7 1.1l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0 1.1 2.7H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg><span>スコア</span></button>
+    <button class="tb" id="btnTools" title="ツール（一括編集・録音・ミキサー・書き出し）"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z"/></svg><span>ツール</span></button>
     <button class="tb" id="btnView" title="表示（スコア / パート譜・実音 / 記譜音）"><svg viewBox="0 0 24 24"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12z"/><circle cx="12" cy="12" r="2.8"/></svg><span id="viewLabel">スコア</span></button>
     <div class="sep"></div>
     <div class="zoom">
@@ -56,7 +58,7 @@
 
 <div id="toast" role="status"></div>
 <div id="modalRoot"></div>
-<input type="file" id="fileInput" accept=".kanade,.musicxml,.xml,.mxl,application/vnd.recordare.musicxml+xml,application/vnd.recordare.musicxml,application/xml,text/xml" hidden>
+<input type="file" id="fileInput" accept=".kanade,.musicxml,.xml,.mxl,.mid,.midi,audio/midi,audio/x-midi,application/vnd.recordare.musicxml+xml,application/vnd.recordare.musicxml,application/xml,text/xml" hidden>
 
 <script type="module" src="js/main.js"></script>
 </body>

@@ -196,6 +196,8 @@ export function refitAll(score) {
   fillMeasures(score);
 }
 
+// ドラムの種類（drum）と TAB の弦の指定（str）は音といっしょに持ち歩く
+const extra = (n) => ({ ...(n.drum ? { drum: n.drum } : {}), ...(n.str ? { str: n.str } : {}) });
 function sortNotes(notes) { notes.sort((a, b) => diatonic(a) - diatonic(b) || (a.alter || 0) - (b.alter || 0)); return notes; }
 
 // ───────── 音符入力 ─────────
@@ -209,7 +211,7 @@ export function enterNote(score, loc, spec) {
   const at = eventAt(score, { p, s, m, v, t });
   if (at && at.ev.tuplet) {
     at.ev.rest = !spec.pitches;
-    at.ev.notes = spec.pitches ? sortNotes(spec.pitches.map(x => ({ step: x.step, alter: x.alter || 0, octave: x.octave }))) : [];
+    at.ev.notes = spec.pitches ? sortNotes(spec.pitches.map(x => ({ step: x.step, alter: x.alter || 0, octave: x.octave, ...extra(x) }))) : [];
     let nt = at.end, nm = m;
     if (nt >= A[m].len) { nm++; nt = 0; }
     if (nm >= score.measures.length) { appendMeasures(score, 1); }
@@ -231,7 +233,7 @@ export function enterNote(score, loc, spec) {
     remaining -= use;
     const evs = pieces.map((x, k) => ({
       id: newId(), rest: !spec.pitches, type: x.type, dots: x.dots,
-      notes: spec.pitches ? sortNotes(spec.pitches.map(n => ({ step: n.step, alter: n.alter || 0, octave: n.octave, tie: remaining > 0 || k < pieces.length - 1 }))) : [],
+      notes: spec.pitches ? sortNotes(spec.pitches.map(n => ({ step: n.step, alter: n.alter || 0, octave: n.octave, ...extra(n), tie: remaining > 0 || k < pieces.length - 1 }))) : [],
     }));
     replaceSpan(score, A, p, s, m, v, t, evs);
     evs.forEach(e => ids.push(e.id));
@@ -252,7 +254,7 @@ export function addToChord(score, id, pitch) {
   const add = (ev, tie) => {
     if (ev.rest) { ev.rest = false; ev.notes = []; }
     if (ev.notes.some(n => n.step === pitch.step && n.octave === pitch.octave && (n.alter || 0) === (pitch.alter || 0))) return;
-    ev.notes.push({ step: pitch.step, alter: pitch.alter || 0, octave: pitch.octave, tie });
+    ev.notes.push({ step: pitch.step, alter: pitch.alter || 0, octave: pitch.octave, ...extra(pitch), tie });
     sortNotes(ev.notes);
   };
   const chainTie = f.ev.notes.length > 0 && f.ev.notes.every(n => n.tie);
@@ -294,7 +296,7 @@ export function prevEvent(score, f) {
 export function mapPitches(score, id, fn, noteIndex = null) {
   const f = findEvent(score, id);
   if (!f || f.ev.rest) return false;
-  f.ev.notes = f.ev.notes.map((n, i) => (noteIndex === null || i === noteIndex ? { ...fn(n), tie: n.tie } : n));
+  f.ev.notes = f.ev.notes.map((n, i) => (noteIndex === null || i === noteIndex ? { ...fn(n), tie: n.tie, ...(n.str ? { str: n.str } : {}) } : n));
   sortNotes(f.ev.notes);
   return true;
 }
@@ -339,7 +341,7 @@ export function removeNote(score, id, noteIndex) {
 export function setDuration(score, id, type, dots) {
   const f = findEvent(score, id);
   if (!f || f.ev.tuplet) return null;
-  const pitches = f.ev.rest ? null : f.ev.notes.map(n => ({ step: n.step, alter: n.alter, octave: n.octave }));
+  const pitches = f.ev.rest ? null : f.ev.notes.map(n => ({ step: n.step, alter: n.alter, octave: n.octave, ...extra(n) }));
   const tieOut = !f.ev.rest && f.ev.notes.every(n => n.tie);
   const keep = { art: f.ev.art, lyr: f.ev.lyr, grace: f.ev.grace };
   const r = enterNote(score, { p: f.p, s: f.s, m: f.m, v: f.v, t: f.t }, { type, dots, pitches });

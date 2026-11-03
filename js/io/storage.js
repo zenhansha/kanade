@@ -47,7 +47,9 @@ export const canPickFiles = typeof window !== 'undefined' && 'showSaveFilePicker
 const PICK_TYPES = {
   kanade: { description: 'KANADE 楽譜', accept: { 'application/x-kanade+json': ['.kanade'] } },
   musicxml: { description: 'MusicXML', accept: { 'application/vnd.recordare.musicxml+xml': ['.musicxml'] } },
-  open: { description: '楽譜（KANADE / MusicXML）', accept: { 'application/x-kanade+json': ['.kanade'], 'application/vnd.recordare.musicxml+xml': ['.musicxml', '.xml'], 'application/vnd.recordare.musicxml': ['.mxl'] } },
+  midi: { description: 'MIDI ファイル', accept: { 'audio/midi': ['.mid', '.midi'] } },
+  wav: { description: 'WAV オーディオ', accept: { 'audio/wav': ['.wav'] } },
+  open: { description: '楽譜（KANADE / MusicXML / MIDI）', accept: { 'application/x-kanade+json': ['.kanade'], 'application/vnd.recordare.musicxml+xml': ['.musicxml', '.xml'], 'application/vnd.recordare.musicxml': ['.mxl'], 'audio/midi': ['.mid', '.midi'] } },
 };
 
 // 保存先を選んでもらう（キャンセルなら null）
@@ -78,7 +80,7 @@ export async function ensurePermission(handle) {
 }
 
 // ファイルを書き出す：PC は保存ダイアログ、iPad は共有シート（「"ファイル"に保存」など）、それ以外はダウンロード
-// kind = 'kanade' | 'musicxml'。保存ダイアログを使ったときはそのハンドルを返す
+// kind = 'kanade' | 'musicxml' | 'midi' | 'wav'。保存ダイアログを使ったときはそのハンドルを返す
 export async function saveFile(name, blob, kind = 'musicxml') {
   if (canPickFiles) {
     const h = await pickSaveFile(name, kind);

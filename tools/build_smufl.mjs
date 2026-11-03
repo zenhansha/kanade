@@ -18,7 +18,8 @@ metNoteWhole metNoteHalfUp metNoteQuarterUp metNote8thUp metNote16thUp metNote32
 repeatDot segno coda keyboardPedalPed keyboardPedalUp
 graceNoteAcciaccaturaStemUp graceNoteAcciaccaturaStemDown
 ottavaAlta ottavaBassaVb quindicesimaAlta quindicesimaBassa ornamentTrill ornamentMordent ornamentShortTrill ornamentTurn wiggleTrill
-breathMarkComma caesura stringsUpBow stringsDownBow dynamicSforzandoPiano dynamicRinforzando2 csymAccidentalFlat csymAccidentalSharp`.split(/\s+/);
+breathMarkComma caesura stringsUpBow stringsDownBow dynamicSforzandoPiano dynamicRinforzando2 csymAccidentalFlat csymAccidentalSharp
+noteheadCircleX noteheadDiamondBlack noteheadDiamondWhite 4stringTabClef noteheadSlashHorizontalEnds noteheadSlashWhiteWhole noteheadSlashWhiteHalf`.split(/\s+/);
 const out = { defaults: meta.engravingDefaults, glyphs: {} };
 for (const n of want) {
   if (!names[n]) { console.error('missing', n); continue; }

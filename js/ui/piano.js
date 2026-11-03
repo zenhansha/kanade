@@ -28,14 +28,16 @@ export class Piano {
       this.down.add(midi);
       k.classList.add('down');
       const st = this.app.state;
-      if (st.mode === 'input') {
+      const rec = this.app.tools?.rec;
+      if (rec?.active) { this.app.recSound(midi); rec.noteOn(midi, 90); }
+      else if (st.mode === 'input') {
         const fifths = this.app.L.attrs[st.caret.m]?.fifths || 0;
         this.app.enterPitch(spellMidi(midi, fifths), { chord });
       } else {
         const part = this.app.score.parts[0];
         this.app.synth.play({ midi, program: part.program, dur: 0.6 });
       }
-      const up = () => { this.down.delete(midi); k.classList.remove('down'); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); };
+      const up = () => { if (rec?.active) rec.noteOff(midi); this.down.delete(midi); k.classList.remove('down'); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up); };
       window.addEventListener('pointerup', up);
       window.addEventListener('pointercancel', up);
     });

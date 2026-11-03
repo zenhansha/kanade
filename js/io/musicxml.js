@@ -3,7 +3,8 @@
 // Phase 2 で増えたもの：アーティキュレーション・強弱/文字の表情記号・コードネーム・スラー・松葉・8va・ペダル・トリル線・
 // 歌詞・装飾音符・反復記号（|: :|・カッコ）・セーニョ/コーダ/Fine/D.C./D.S.
 import { parseXML, kid, kids, txt, num } from './xml.js';
-import { TPQ, TYPES, dottedTicks, splitSpan, diatonic, midiOf, keyAlter, clefKeyFromXml, CLEFS, beatTicks, TYPE_FLAGS, transposeInterval } from '../core/music.js';
+import { TPQ, TYPES, dottedTicks, splitSpan, diatonic, midiOf, keyAlter, clefKeyFromXml, CLEFS, beatTicks, TYPE_FLAGS, transposeInterval, STEPS } from '../core/music.js';
+import { DRUMS, DRUM, drumOf, drumAt, drumForGm, drumPitch, tabFrets, TUNINGS } from '../core/perc.js';
 import { createScore, measureAttrs, evTicks, measureRest, newId, INSTRUMENTS, INST, fillMeasures } from '../core/score.js';
 import { positions, normalizeVoice } from '../core/edit.js';
 import { ARTICS, DYNAMICS, JUMPS, parseChord, spanEnd } from '../core/marks.js';
@@ -60,6 +61,13 @@ export function exportMusicXML(score) {
   out.push('  <part-list>');
   score.parts.forEach((p, i) => {
     const id = 'P' + (i + 1);
+    if (p.staves.some(st => st.clef === 'percussion')) {
+      // ドラム：太鼓・シンバルごとに楽器を作り、GM のドラム番号（midi-unpitched）を書く
+      out.push(`    <score-part id="${id}"><part-name>${esc(p.name)}</part-name><part-abbreviation>${esc(p.abbr)}</part-abbreviation>` +
+        DRUMS.map((d, k) => `<score-instrument id="${id}-I${k + 1}"><instrument-name>${esc(d.ja)}</instrument-name></score-instrument>`).join('') +
+        DRUMS.map((d, k) => `<midi-instrument id="${id}-I${k + 1}"><midi-channel>10</midi-channel><midi-unpitched>${d.gm + 1}</midi-unpitched></midi-instrument>`).join('') + '</score-part>');
+      return;
+    }
     out.push(`    <score-part id="${id}"><part-name>${esc(p.name)}</part-name><part-abbreviation>${esc(p.abbr)}</part-abbreviation>` +
       `<score-instrument id="${id}-I1"><instrument-name>${esc(p.name)}</instrument-name></score-instrument>` +
       `<midi-instrument id="${id}-I1"><midi-channel>${(i % 15) + 1 + (i % 15 >= 9 ? 1 : 0)}</midi-channel><midi-program>${p.program + 1}</midi-program></midi-instrument></score-part>`);
@@ -133,6 +141,11 @@ export function exportMusicXML(score) {
         const c = CLEFS[ck] || CLEFS.treble;
         at.push(`<clef${nst > 1 ? ` number="${s + 1}"` : ''}><sign>${c.sign}</sign>${c.sign === 'percussion' ? '' : `<line>${c.line}</line>`}${c.oct ? `<clef-octave-change>${c.oct}</clef-octave-change>` : ''}</clef>`);
       });
+      if (m === 0) part.staves.forEach((st, s) => {
+        if (st.tabOf == null) return;
+        const tun = st.tuning || TUNINGS.guitar.notes;
+        at.push(`<staff-details${nst > 1 ? ` number="${s + 1}"` : ''}><staff-lines>${tun.length}</staff-lines>${tun.map((mid, i) => { const p = spellTune(mid); return `<staff-tuning line="${tun.length - i}"><tuning-step>${p.step}</tuning-step>${p.alter ? `<tuning-alter>${p.alter}</tuning-alter>` : ''}<tuning-octave>${p.octave}</tuning-octave></staff-tuning>`; }).join('')}</staff-details>`);
+      });
       if (m === 0 && inst.oct) at.push(`<transpose><diatonic>${inst.trans.diatonic}</diatonic><chromatic>${inst.trans.chromatic}</chromatic></transpose>`);
       if (at.length) out.push(`      <attributes>${at.join('')}</attributes>`);
       if (ms.tempo && pi === 0) {
@@ -142,8 +155,10 @@ export function exportMusicXML(score) {
       if (pi === 0 && ms.coda) out.push('      <direction placement="above"><direction-type><coda/></direction-type><sound coda="coda"/></direction>');
       let first = true;
       part.staves.forEach((st, s) => {
-        const sm = st.measures[m];
-        const accs = accidentalMap(sm, a.fifths);
+        const isTab = st.tabOf != null, isPerc = st.clef === 'percussion';
+        const sm = isTab ? part.staves[st.tabOf].measures[m] : st.measures[m];
+        const tun = isTab ? st.tuning || TUNINGS.guitar.notes : null;
+        const accs = isPerc ? new Map() : accidentalMap(sm, a.fifths);
         const dirs = posDirs[s][m].sort((x, y) => x.t - y.t || (x.harmony ? -1 : 1) - (y.harmony ? -1 : 1));
         let di = 0;
         const flushDirs = (until, curPos) => {
@@ -174,11 +189,11 @@ export function exportMusicXML(score) {
             const staffT = nst > 1 ? `<staff>${s + 1}</staff>` : '';
             const typeT = ev.mr ? '' : `<type>${ev.type}</type>${'<dot/>'.repeat(ev.dots || 0)}`;
             // アーティキュレーション・スラーなど（和音では最初の音だけに書く）
-            const marks = noteMarks[ev.id];
-            const artN = artXml(ev.art) + (marks ? marks.stop.join('') + marks.start.join('') : '');
+            const marks = isTab ? null : noteMarks[ev.id];
+            const artN = isTab ? '' : artXml(ev.art) + (marks ? marks.stop.join('') + marks.start.join('') : '');
             // 歌詞
             let lyrT = '';
-            (ev.lyr || []).forEach((ly, verse) => {
+            (isTab ? [] : ev.lyr || []).forEach((ly, verse) => {
               if (!ly || !ly.t) return;
               const key = `${s}:${v}:${verse}`;
               const prev = !!lyrPrev[key];
@@ -187,9 +202,10 @@ export function exportMusicXML(score) {
               lyrT += `<lyric number="${verse + 1}"><syllabic>${syl}</syllabic><text>${esc(ly.t)}</text></lyric>`;
             });
             // 装飾音符（長さなし、本音符の前）
-            for (const gr of ev.grace || []) gr.notes.forEach((n, k) => {
-              out.push(`      <note><grace${gr.slash ? ' slash="yes"' : ''}/>${k > 0 ? '<chord/>' : ''}<pitch><step>${n.step}</step>${n.alter ? `<alter>${n.alter}</alter>` : ''}<octave>${n.octave}</octave></pitch><voice>${vn}</voice><type>${gr.type}</type>${staffT}</note>`);
+            for (const gr of isTab ? [] : ev.grace || []) gr.notes.forEach((n, k) => {
+              out.push(`      <note><grace${gr.slash ? ' slash="yes"' : ''}/>${k > 0 ? '<chord/>' : ''}${pitchXml(n, isPerc)}${instXml(n, isPerc, pi)}<voice>${vn}</voice><type>${gr.type}</type>${headXml(n, isPerc)}${staffT}</note>`);
             });
+            const frets = isTab && !ev.rest ? tabFrets(ev.notes, tun) : null;
             if (ev.rest) {
               const notations = tupN + artN;
               out.push(`      <note><rest${ev.mr ? ' measure="yes"' : ''}/><duration>${d}</duration><voice>${vn}</voice>${typeT}${tm}${staffT}${notations ? `<notations>${notations}</notations>` : ''}</note>`);
@@ -205,9 +221,10 @@ export function exportMusicXML(score) {
               const tied = (stop ? '<tied type="stop"/>' : '') + (n.tie ? '<tied type="start"/>' : '');
               const acc = accs.get(n) ? `<accidental>${ACC_NAME[n.alter || 0]}</accidental>` : '';
               const beamT = k === 0 && beams[idx] ? beams[idx].map((b, li) => `<beam number="${li + 1}">${b}</beam>`).join('') : '';
-              const notations = tied + (k === 0 ? tupN + artN : '');
-              out.push(`      <note>${k > 0 ? '<chord/>' : ''}<pitch><step>${n.step}</step>${n.alter ? `<alter>${n.alter}</alter>` : ''}<octave>${n.octave}</octave></pitch>` +
-                `<duration>${d}</duration>${ties}<voice>${vn}</voice>${typeT}${acc}${tm}${staffT}${beamT}${notations ? `<notations>${notations}</notations>` : ''}${k === 0 ? lyrT : ''}</note>`);
+              const tech = frets && frets[k] ? `<technical><string>${frets[k].str}</string><fret>${frets[k].fret}</fret></technical>` : '';
+              const notations = tied + (k === 0 ? tupN + artN : '') + tech;
+              out.push(`      <note>${k > 0 ? '<chord/>' : ''}${pitchXml(n, isPerc)}` +
+                `<duration>${d}</duration>${ties}${instXml(n, isPerc, pi)}<voice>${vn}</voice>${typeT}${acc}${tm}${headXml(n, isPerc)}${staffT}${beamT}${notations ? `<notations>${notations}</notations>` : ''}${k === 0 ? lyrT : ''}</note>`);
             });
           });
           if (v === 0) flushDirs(Infinity, a.len);
@@ -356,7 +373,9 @@ export function importMusicXML(xmlText) {
   const pinfo = {};
   for (const sp of kids(plist, 'score-part')) {
     const prog = num(kid(sp, 'midi-instrument'), 'midi-program', 0);
-    pinfo[sp.attrs.id] = { name: txt(sp, 'part-name') || txt(sp, 'part-name-display'), abbr: txt(sp, 'part-abbreviation'), program: prog ? prog - 1 : null };
+    pinfo[sp.attrs.id] = { name: txt(sp, 'part-name') || txt(sp, 'part-name-display'), abbr: txt(sp, 'part-abbreviation'), program: prog ? prog - 1 : null, unpitched: {} };
+    // ドラム：楽器 id → GM のドラム番号
+    for (const mi of kids(sp, 'midi-instrument')) { const u = num(mi, 'midi-unpitched', 0); if (u) pinfo[sp.attrs.id].unpitched[mi.attrs.id] = u - 1; }
   }
 
   const xparts = kids(root, 'part');
@@ -372,7 +391,9 @@ export function importMusicXML(xmlText) {
 
   xparts.forEach((xp, pi) => {
     const info = pinfo[xp.attrs.id] || { name: 'Part ' + (pi + 1) };
-    const instId = guessInst(info.name, info.program);
+    // 音程のない音符（unpitched）があればドラムセット
+    const hasUnpitched = kids(xp, 'measure').some(xm => kids(xm, 'note').some(n => kid(n, 'unpitched')));
+    const instId = hasUnpitched ? 'drumset' : guessInst(info.name, info.program);
     const inst = INST[instId];
     // 譜表数
     let nStaves = 1;
@@ -398,7 +419,11 @@ export function importMusicXML(xmlText) {
       const pt = kid(el, 'pitch');
       if (pt) pitch = { step: txt(pt, 'step', 'C'), alter: Math.round(num(pt, 'alter', 0)), octave: num(pt, 'octave', 4) };
       const up = kid(el, 'unpitched');
-      if (up) pitch = { step: txt(up, 'display-step', 'B'), alter: 0, octave: num(up, 'display-octave', 4) };
+      if (up) {
+        const disp = { step: txt(up, 'display-step', 'B'), alter: 0, octave: num(up, 'display-octave', 4) };
+        const ins = kid(el, 'instrument'), gm = ins && info.unpitched ? info.unpitched[ins.attrs.id] : null;
+        return drumPitch(gm != null ? drumForGm(gm) : drumAt(disp));
+      }
       if (pitch) {
         pitch = transposeInterval(pitch, trans.dia, trans.chrom); // 記譜音 → 実音
         if (inst.oct) pitch = transposeInterval(pitch, -Math.round(inst.oct / 12) * 7, -inst.oct); // オクターブ移調楽器は記譜で持つ
@@ -702,9 +727,48 @@ export function importMusicXML(xmlText) {
       (sm.spans || (sm.spans = [])).push({ k: sp.k, v: sp.v, t: onsetCovering(sm, sp.v, t), dm: b.m - sp.a.m, t2: b.t });
     }
     delete part._raw; delete part._spans;
+    // TAB の譜表：五線があればそれにつなぐ（中身は五線から作るので捨てる）。TAB だけのパートは五線を作る
+    const tabs = part.staves.map((st, s) => (st.clef === 'tab' ? s : -1)).filter(s => s >= 0);
+    if (tabs.length) {
+      let src = part.staves.findIndex(st => st.clef !== 'tab');
+      const xd = kids(xparts[p], 'measure').flatMap(xm => kids(kid(xm, 'attributes'), 'staff-details'));
+      if (src < 0) {
+        // TAB だけ：その音を五線にして、TAB を後ろに足す
+        const st0 = part.staves[tabs[0]];
+        const low = (st0.measures || []).some(sm => sm?.voices?.some(v => v && v.some(e => !e.rest && e.notes.some(n => midiOf(n) < 40))));
+        part.staves.splice(tabs[0], 0, { clef: low ? 'bass8vb' : 'treble8vb', measures: st0.measures });
+        src = tabs[0];
+        tabs[0] += 1;
+      }
+      for (const s of tabs) {
+        const st = part.staves[s];
+        const sd = xd.find(d => (parseInt(d.attrs.number, 10) || 1) - 1 === s) || xd[0];
+        const tun = sd ? kids(sd, 'staff-tuning').map(t => ({ line: parseInt(t.attrs.line, 10) || 1, midi: midiOf({ step: txt(t, 'tuning-step', 'E'), alter: num(t, 'tuning-alter', 0), octave: num(t, 'tuning-octave', 2) }) })).sort((a, b) => b.line - a.line).map(x => x.midi) : [];
+        const lines = sd ? num(sd, 'staff-lines', 6) : 6;
+        st.tabOf = src;
+        st.tuning = tun.length ? tun : (lines <= 5 ? TUNINGS.bass.notes : TUNINGS.guitar.notes).slice(0, lines);
+        st.measures = [];
+      }
+    }
   });
   fillMeasures(score);
   return score;
+}
+
+// ドラムは unpitched（五線の位置）＋ instrument（どの太鼓か）＋ notehead（×など）
+function pitchXml(n, perc) {
+  if (perc) return `<unpitched><display-step>${n.step}</display-step><display-octave>${n.octave}</display-octave></unpitched>`;
+  return `<pitch><step>${n.step}</step>${n.alter ? `<alter>${n.alter}</alter>` : ''}<octave>${n.octave}</octave></pitch>`;
+}
+function instXml(n, perc, pi) { return perc ? `<instrument id="P${pi + 1}-I${DRUMS.indexOf(drumOf(n)) + 1}"/>` : ''; }
+function headXml(n, perc) {
+  const h = perc ? drumOf(n).head : null;
+  return h ? `<notehead>${{ x: 'x', circlex: 'circle-x', diamond: 'diamond' }[h]}</notehead>` : '';
+}
+function spellTune(midi) {
+  const names = [['C', 0], ['C', 1], ['D', 0], ['E', -1], ['E', 0], ['F', 0], ['F', 1], ['G', 0], ['G', 1], ['A', 0], ['B', -1], ['B', 0]];
+  const [step, alter] = names[midi % 12];
+  return { step, alter, octave: Math.floor(midi / 12) - 1 };
 }
 
 function addArt(ev, k) { const a = ev.art || (ev.art = []); if (!a.includes(k)) a.push(k); }

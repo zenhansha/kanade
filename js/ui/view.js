@@ -2,7 +2,7 @@
 import { SMUFL } from '../smufl.js';
 import { tickToX } from '../engrave/layout.js';
 import { clefInfo } from '../core/score.js';
-import { fromDiatonic, keyAlter } from '../core/music.js';
+import { fromDiatonic, keyAlter, spellMidi } from '../core/music.js';
 
 const G = SMUFL.glyphs;
 const MM_PX = 96 / 25.4;
@@ -114,7 +114,7 @@ export class ScoreView {
     L.systems.forEach((sy, k) => {
       if (!sy || sy.page !== pt.page) return;
       sy.staffYs.forEach((sy0, r) => {
-        const d = Math.abs(pt.y - (sy0 + 2));
+        const d = Math.abs(pt.y - (sy0 + (L.rows[r].h || 4) / 2)) - ((L.rows[r].h || 4) - 4) / 2;
         if (!best || d < best.d) best = { d, k, r, staffY: sy0 };
       });
     });
@@ -123,7 +123,15 @@ export class ScoreView {
     let m = sy.ms[0];
     for (const mi of sy.ms) if (pt.x >= L.measures[mi].x0) m = mi;
     if (pt.x > L.measures[sy.ms[sy.ms.length - 1]].x1) m = sy.ms[sy.ms.length - 1];
-    const row = L.rows[best.r];
+    let row = L.rows[best.r];
+    // TAB 譜をタップ：その弦の開放弦の音を、上の五線に入れる（あとは ↑↓ でフレットを上げ下げ）
+    if (row.kind === 'tab' && row.src >= 0) {
+      const tun = row.tuning || [64, 59, 55, 50, 45, 40];
+      const str = Math.max(0, Math.min(tun.length - 1, Math.round((pt.y - best.staffY) / 1.5)));
+      const fifths = L.fifthsAt ? L.fifthsAt(row.src, m) : L.attrs[m].fifths;
+      const src = L.rows[row.src];
+      return { ...best, r: row.src, staffY: L.systems[best.k].staffYs[row.src], m, p: src.p, s: src.s, pos: 0, pitch: spellMidi(tun[str], fifths), tabStr: str + 1, x: pt.x, y: pt.y, page: pt.page };
+    }
     const clef = clefInfo(L.clefs[m][best.r]);
     const pos = Math.round((best.staffY + 2 - pt.y) * 2);
     const dn = clef.mid + pos;
@@ -298,7 +306,7 @@ export class ScoreView {
     }
     for (const [k, b] of bySys) {
       const sy = L.systems[k];
-      const y0 = sy.staffYs[range.r1] - 1, y1 = sy.staffYs[range.r2] + 5;
+      const y0 = sy.staffYs[range.r1] - 1, y1 = sy.staffYs[range.r2] + (this.L.rows[range.r2]?.h || 4) + 1;
       const el = this.overlay('rng' + n++, sy.page, 'rangesel');
       el.style.left = b.x0 * sp + 'px'; el.style.top = y0 * sp + 'px';
       el.style.width = (b.x1 - b.x0) * sp + 'px'; el.style.height = (y1 - y0) * sp + 'px';

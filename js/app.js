@@ -18,6 +18,9 @@ import { serializeKanade, parseKanade, KANADE_EXT, KANADE_MIME } from './io/kana
 import { exportMusicXML, importMusicXML } from './io/musicxml.js';
 import { readMxl } from './io/mxl.js';
 import { SMUFL } from './smufl.js';
+import * as P from './core/perc.js';
+import { Tools } from './ui/tools.js';
+import { importMidi } from './io/midifile.js';
 
 const G = SMUFL.glyphs;
 export const DUR_GLYPH = { breve: 'metNoteDoubleWhole', whole: 'metNoteWhole', half: 'metNoteHalfUp', quarter: 'metNoteQuarterUp', eighth: 'metNote8thUp', '16th': 'metNote16thUp', '32nd': 'metNote32ndUp', '64th': 'metNote64thUp' };
@@ -34,7 +37,7 @@ export class App {
     // 表示の設定：part = パート譜で表示するパート（null ならスコア）、transposed = 移調楽器を記譜音で表示
     let tr = false;
     try { tr = localStorage.getItem('kanade.transposed') === '1'; } catch (e) { /* 使えない環境 */ }
-    this.viewOpts = { part: null, transposed: tr, multiRest: true };
+    this.viewOpts = { part: null, transposed: tr, multiRest: true, rangeCheck: false };
     this.textEd = null; // 歌詞・コードネームの入力中
     this.history = new History();
     this.synth = new Synth();
@@ -52,11 +55,13 @@ export class App {
     this.palette = new Palette(this, document.getElementById('palette'));
     this.piano = new Piano(this, document.getElementById('piano'));
     this.dialogs = new Dialogs(this);
+    this.tools = new Tools(this);
     bindKeys(this);
     this.bindTopbar();
     this.bindPointer();
     this.midi = new MidiInput({
-      onNoteOn: (n, vel, chord) => this.midiNoteOn(n, vel, chord),
+      onNoteOn: (n, vel, chord, stamp) => this.midiNoteOn(n, vel, chord, stamp),
+      onNoteOff: (n, stamp) => this.midiNoteOff(n, stamp),
       onStatus: (st) => this.midiStatus(st),
     });
     if (this.midi.supported) this.midi.connect();
@@ -168,7 +173,7 @@ export class App {
     const t0 = performance.now();
     const vo = this.viewOpts;
     if (vo.part != null && !this.score.parts[vo.part]) vo.part = null;
-    this.L = layoutScore(this.score, { measureText: this.measureText, parts: vo.part != null ? [vo.part] : null, transposed: vo.transposed, multiRest: vo.multiRest });
+    this.L = layoutScore(this.score, { measureText: this.measureText, parts: vo.part != null ? [vo.part] : null, transposed: vo.transposed, multiRest: vo.multiRest, rangeCheck: vo.rangeCheck });
     this.view.render(this.L);
     this.layoutMs = performance.now() - t0;
     this.refreshOverlays();
@@ -215,7 +220,9 @@ export class App {
     // ステータス
     const parts = [];
     const part = this.score.parts[st.mode === 'input' ? st.caret.p : (this.selLoc()?.p ?? 0)];
-    if (st.mode === 'input') {
+    if (this.tools?.rec.active) {
+      parts.push(`● 録音中 · ${this.score.parts[this.tools.rec.o.p]?.name || ''} · 第${this.tools.rec.where() + 1}小節`, 'スペース / Esc / ■ で止めて楽譜にする');
+    } else if (st.mode === 'input') {
       const c = st.caret;
       const beat = A[c.m] ? 1 + c.t / ((TPQ * 4) / A[c.m].time.beatType) : 1;
       parts.push(`入力モード · ${part?.name || ''} · 第${c.m + 1}小節 ${+beat.toFixed(2)}拍目 · 声部${st.voice + 1}`);
@@ -408,13 +415,35 @@ export class App {
     const part = this.score.parts[this.state.mode === 'input' ? this.state.caret.p : (this.selLoc()?.p ?? 0)] || this.score.parts[0];
     const inst = INST[part.inst] || {};
     this.synth.loadSamples(inst.sf);
-    for (const p of pitches) this.synth.play({ midi: midiOf(p) + (inst.oct || 0), program: part.program, sf: inst.sf, dur, vel: 0.7 });
+    for (const p of pitches) {
+      if (p.drum) { this.synth.play({ drum: p.drum, dur, vel: 0.7 }); continue; }
+      this.synth.play({ midi: midiOf(p) + (inst.oct || 0), program: part.program, sf: inst.sf, dur, vel: 0.7 });
+    }
   }
 
   // pitch を入力する（キー・MIDI・画面鍵盤・タップ共通）
+  // ドラム譜では、その位置のドラムにする（MIDI からなら GM の番号で）
+  fitPitch(pitch, loc) {
+    const stf = this.score.parts[loc.p]?.staves[loc.s];
+    if (stf?.clef === 'percussion' && !pitch.drum) return P.drumPitch(P.drumAt(pitch));
+    return pitch;
+  }
+  setDrum(id, d) {
+    const f = E.findEvent(this.score, id);
+    if (!f || f.ev.rest) return;
+    const ni = this.state.sel?.noteIndex;
+    f.ev.notes = f.ev.notes.map((n, i) => (ni == null || ni === i ? { ...P.drumPitch(d), tie: n.tie } : n));
+  }
+  setString(id, str) {
+    const f = E.findEvent(this.score, id);
+    if (!f || f.ev.rest) return;
+    const ni = this.state.sel?.noteIndex;
+    f.ev.notes.forEach((n, i) => { if (ni == null || ni === i) { if (str) n.str = str; else delete n.str; } });
+  }
   enterPitch(pitch, opts = {}) {
     const st = this.state;
     if (st.mode !== 'input') this.setMode('input');
+    pitch = this.fitPitch(pitch, opts.at || st.caret);
     const chord = opts.chord || st.chord;
     // 装飾音符モード：カーソルの音符の前に付ける（カーソルは進まない）
     if (st.grace && !st.rest) {
@@ -508,6 +537,18 @@ export class App {
     if (!id) return;
     const ni = st.mode === 'select' ? st.sel.noteIndex ?? null : null;
     this.edit('音高の変更', () => {
+      const f0 = E.findEvent(this.score, id);
+      if (f0 && this.score.parts[f0.p].staves[f0.s].clef === 'percussion') {
+        // ドラム譜：上下でとなりの位置のドラムへ
+        const order = [...new Set(P.DRUMS.map(d => diatonic(d)))].sort((x, y) => x - y);
+        f0.ev.notes = f0.ev.notes.map((n, i) => {
+          if (ni != null && ni !== i) return n;
+          const k = order.indexOf(diatonic(n)) + Math.sign(amount) * (kind === 'octave' ? 3 : 1);
+          const pos = order[Math.max(0, Math.min(order.length - 1, k))];
+          return { ...P.drumPitch(P.drumAt(fromDiatonic(pos))), tie: n.tie };
+        });
+        return;
+      }
       if (kind === 'semi') E.shiftSemis(this.score, id, amount, this.fifthsAt(id), ni);
       else if (kind === 'octave') E.shiftDiatonic(this.score, id, 7 * amount, ni);
       else E.shiftDiatonic(this.score, id, amount, ni);
@@ -936,7 +977,10 @@ export class App {
     const rows = this.L.rows;
     if (st.mode === 'input') {
       const r = rows.findIndex(x => x.p === st.caret.p && x.s === st.caret.s);
-      const nr = Math.max(0, Math.min(rows.length - 1, r + dir));
+      let nr = r + dir;
+      while (rows[nr]?.kind === 'tab') nr += dir;
+      nr = Math.max(0, Math.min(rows.length - 1, nr));
+      if (rows[nr].kind === 'tab') return;
       st.caret = { ...st.caret, p: rows[nr].p, s: rows[nr].s };
       const voice = E.getVoice(this.score, st.caret.p, st.caret.s, st.caret.m, st.caret.v);
       if (!voice || !E.positions(voice).some(x => x.start === st.caret.t)) {
@@ -960,6 +1004,7 @@ export class App {
   }
   escape() {
     const st = this.state;
+    if (this.tools.rec.active) return this.tools.stopRec();
     if (st.mode === 'input') this.setMode('select');
     else { st.sel = null; this.refreshOverlays(); this.updateUI(); }
   }
@@ -991,13 +1036,15 @@ export class App {
 
   // ───────── 再生 ─────────
   async togglePlay() {
+    if (this.tools.rec.active) return this.tools.stopRec();
     if (this.player.playing) { this.player.stop(); this.updateUI(); return; }
     this.synth.ensure();
     const from = this.playFrom ?? this.focusMeasure();
     this.playFrom = null;
     this.followPlay = true;
     document.getElementById('btnPlay').classList.add('on');
-    await this.player.start(this.score, from);
+    const pb = this.score.settings.playback || {};
+    await this.player.start(this.score, from, { click: !!pb.click, countIn: pb.click ? pb.countIn || 0 : 0 });
     this.updateUI();
   }
   rewind() {
@@ -1008,10 +1055,13 @@ export class App {
   }
 
   // ───────── MIDI ─────────
-  midiNoteOn(note, vel, chordHeld) {
+  midiNoteOn(note, vel, chordHeld, stamp) {
     const btn = document.getElementById('btnMidi');
     btn.classList.add('flash'); setTimeout(() => btn.classList.remove('flash'), 120);
     const st = this.state;
+    if (this.tools.rec.active) { this.recSound(note, vel); this.tools.rec.noteOn(note, vel, stamp); return; }
+    const cst = this.score.parts[st.caret.p]?.staves[st.caret.s];
+    if (st.mode === 'input' && cst?.clef === 'percussion') return this.enterPitch(P.drumPitch(P.drumForGm(note)), { chord: chordHeld });
     if (st.mode !== 'input') {
       // 選択モードでは音を鳴らすだけ（試し弾き）
       const part = this.score.parts[0];
@@ -1021,6 +1071,14 @@ export class App {
     const fifths = this.L.attrs[st.caret.m]?.fifths || 0;
     const pitch = spellMidi(note, fifths);
     this.enterPitch(pitch, { chord: chordHeld });
+  }
+  midiNoteOff(note, stamp) { if (this.tools.rec.active) this.tools.rec.noteOff(note, stamp); }
+  // 録音中に弾いた音を鳴らす（録音しているパートの音色で）
+  recSound(note, vel = 90) {
+    const o = this.tools.rec.o, part = this.score.parts[o.p];
+    const inst = INST[part.inst] || {};
+    if (part.staves.some(x => x.clef === 'percussion')) return this.synth.play({ drum: P.drumForGm(note).id, vel: vel / 127 });
+    this.synth.play({ midi: note + (inst.oct || 0), program: part.program, sf: inst.sf, dur: 0.5, vel: vel / 127 });
   }
   midiStatus(s) {
     const btn = document.getElementById('btnMidi');
@@ -1045,6 +1103,7 @@ export class App {
       const isKanade = /\.kanade$/i.test(file.name);
       let score;
       if (isKanade) score = parseKanade(await file.text());
+      else if (/\.midi?$/i.test(file.name)) score = importMidi(await file.arrayBuffer(), { title: file.name.replace(/\.midi?$/i, '') });
       else {
         const xml = /\.mxl$/i.test(file.name) ? await readMxl(await file.arrayBuffer()) : await file.text();
         score = importMusicXML(xml);
@@ -1086,6 +1145,8 @@ export class App {
     $('btnMeasure').onclick = (e) => this.dialogs.measureMenu(e.currentTarget);
     $('btnScore').onclick = (e) => this.dialogs.scoreMenu(e.currentTarget);
     $('btnView').onclick = (e) => this.dialogs.viewMenu(e.currentTarget);
+    $('btnTools').onclick = (e) => this.tools.menu(e.currentTarget);
+    $('btnRec').onclick = () => (this.tools.rec.active ? this.tools.stopRec() : this.tools.hyperscribe());
     $('btnTempo').onclick = () => this.dialogs.tempo();
     $('docTitle').onclick = () => this.dialogs.scoreInfo();
     $('btnHelp').onclick = () => this.dialogs.help();
@@ -1324,6 +1385,11 @@ export class App {
     if (f?.ev.grace) items.push({ label: '装飾音符を消す', run: () => this.edit('装飾音符の削除', () => { delete E.findEvent(this.score, f.ev.id).ev.grace; }) });
     if (f?.ev.art) items.push({ label: 'アーティキュレーションを全部外す', run: () => this.edit('アーティキュレーション', () => K.clearArtics(this.score, this.selIds())) });
     items.push({ label: '反復記号・カッコ…', run: () => this.dialogs.repeats() });
+    // Phase 3：ドラム・TAB・一括編集
+    const fst = f && this.score.parts[f.p].staves[f.s];
+    if (isNote && fst?.clef === 'percussion') items.push({ label: 'ドラムの種類…', kbd: '▸', run: () => this.tools.drumMenu(pt) });
+    if (isNote && this.score.parts[f.p].staves.some(x => x.tabOf != null)) items.push({ label: '弦の指定・チューニング（TAB）…', kbd: '▸', run: () => this.tools.stringMenu(pt, this.score.parts[f.p]) });
+    if (sel.kind === 'range' || f) items.push({ label: '一括編集…', kbd: '▸', run: () => this.dialogs.menu(pt, [{ head: '一括編集' }, ...this.tools.massItems()]) });
     items.push('-', { label: `第${from + 1}小節の設定（拍子・調・音部記号…）`, kbd: '▸', run: () => this.dialogs.measureMenu(pt) });
     this.dialogs.menu(pt, items);
   }
@@ -1350,7 +1416,8 @@ export class App {
     const st = this.state;
     const tg = this.resolveInputTarget(h);
     const loc = { p: h.p, s: h.s, m: h.m, v: st.voice, t: tg.t };
-    const pitch = this.concertOf(h.pitch, h.p); // 記譜音で表示中なら実音にして入れる
+    let pitch = this.concertOf(h.pitch, h.p); // 記譜音で表示中なら実音にして入れる
+    if (h.tabStr) pitch = { ...pitch, str: h.tabStr }; // TAB をタップ：その弦の開放弦
     // 和音モード or Shift：そのタイミングにある音符へ足す（装飾音符モードなら装飾音の和音）
     if ((st.chord || e.shiftKey) && !st.rest && !st.grace) {
       const at = E.eventAt(this.score, loc);

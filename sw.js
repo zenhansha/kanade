@@ -1,12 +1,13 @@
 // Service Worker：アプリ本体をキャッシュして、オフラインでも起動できるようにする
 // 方針：ネットにつながっていれば最新を取りに行き（更新がすぐ反映される）、つながらなければキャッシュを使う。
 // 高音質音源（CDN の大きなファイル）は一度取ったらキャッシュ優先。
-const APP = 'kanade-app-v3';
+const APP = 'kanade-app-v4';
 const SOUNDS = 'kanade-sounds-v1';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css', 'fonts/Bravura.woff2', 'icons/icon.svg', 'icons/icon-192.png',
   'js/main.js', 'js/app.js', 'js/smufl.js', 'js/midi.js',
   'js/core/music.js', 'js/core/score.js', 'js/core/edit.js', 'js/core/marks.js', 'js/core/history.js',
+  'js/core/stream.js', 'js/core/perc.js', 'js/core/massedit.js', 'js/ui/tools.js', 'js/audio/recorder.js', 'js/io/midifile.js',
   'js/engrave/layout.js', 'js/ui/view.js', 'js/ui/palette.js', 'js/ui/piano.js', 'js/ui/dialogs.js', 'js/ui/keys.js',
   'js/audio/synth.js', 'js/audio/player.js', 'js/io/storage.js', 'js/io/kanade.js', 'js/io/musicxml.js', 'js/io/xml.js', 'js/io/mxl.js',
 ];

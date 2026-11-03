@@ -178,11 +178,13 @@ export const CLEFS = {
   alto: { sign: 'C', line: 3, oct: 0, mid: 28, glyph: 'cClef', glyphPos: 0, ja: 'ハ音記号（アルト）' },
   tenor: { sign: 'C', line: 4, oct: 0, mid: 26, glyph: 'cClef', glyphPos: 2, ja: 'ハ音記号（テノール）' },
   percussion: { sign: 'percussion', line: 3, oct: 0, mid: 34, glyph: 'unpitchedPercussionClef1', glyphPos: 0, ja: '打楽器記号' },
+  tab: { sign: 'TAB', line: 5, oct: 0, mid: 34, glyph: '6stringTabClef', glyphPos: 0, ja: 'TAB' },
 };
 export function clefKeyFromXml(sign, line, oct = 0) {
   for (const [k, c] of Object.entries(CLEFS)) if (c.sign === sign && (c.line === line || sign === 'percussion') && c.oct === oct) return k;
   if (sign === 'G') return 'treble';
   if (sign === 'F') return 'bass';
   if (sign === 'C') return line === 4 ? 'tenor' : 'alto';
+  if (sign === 'TAB') return 'tab';
   return 'treble';
 }

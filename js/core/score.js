@@ -10,6 +10,7 @@
 // イベント { id, rest, type, dots, notes:[{step,alter,octave,tie}], tuplet:{id,actual,normal} }
 //   声部1 は常に小節をぴったり埋める（空きは休符）。声部2〜4 は使うときだけ作る。
 import { measureTicks, evTicks as baseEvTicks, CLEFS } from './music.js';
+import { TUNINGS } from './perc.js';
 
 let idSeq = 0;
 export function newId() { return 'e' + Date.now().toString(36).slice(-4) + (idSeq++).toString(36) + Math.random().toString(36).slice(2, 5); }
@@ -33,6 +34,9 @@ export const INSTRUMENTS = [
   { id: 'harp', ja: 'ハープ', abbr: 'Hp.', fam: '弦楽器', clefs: ['treble', 'bass'], program: 46, sf: 'orchestral_harp' },
   { id: 'guitar', ja: 'ギター', abbr: 'Gtr.', fam: '弦楽器', clefs: ['treble8vb'], program: 24, sf: 'acoustic_guitar_nylon' },
   { id: 'bassguitar', ja: 'エレキベース', abbr: 'Bass', fam: '弦楽器', clefs: ['bass8vb'], program: 33, sf: 'electric_bass_finger' },
+  { id: 'guitarTab', ja: 'ギター（五線＋TAB）', abbr: 'Gtr.', fam: '弦楽器', clefs: ['treble8vb', 'tab'], tab: 'guitar', program: 24, sf: 'acoustic_guitar_nylon' },
+  { id: 'egtrTab', ja: 'エレキギター（五線＋TAB）', abbr: 'E.Gtr.', fam: '弦楽器', clefs: ['treble8vb', 'tab'], tab: 'guitar', program: 27, sf: 'electric_guitar_clean' },
+  { id: 'bassTab', ja: 'エレキベース（五線＋TAB）', abbr: 'Bass', fam: '弦楽器', clefs: ['bass8vb', 'tab'], tab: 'bass', program: 33, sf: 'electric_bass_finger' },
   { id: 'piccolo', ja: 'ピッコロ', abbr: 'Picc.', fam: '木管', clefs: ['treble'], program: 72, sf: 'piccolo', oct: 12, trans: { diatonic: 7, chromatic: 12 } },
   { id: 'flute', ja: 'フルート', abbr: 'Fl.', fam: '木管', clefs: ['treble'], program: 73, sf: 'flute' },
   { id: 'oboe', ja: 'オーボエ', abbr: 'Ob.', fam: '木管', clefs: ['treble'], program: 68, sf: 'oboe' },
@@ -54,6 +58,7 @@ export const INSTRUMENTS = [
   { id: 'tenor', ja: 'テノール', abbr: 'T.', fam: '声楽', clefs: ['treble8vb'], program: 52, sf: 'choir_aahs' },
   { id: 'bass', ja: 'バス', abbr: 'B.', fam: '声楽', clefs: ['bass'], program: 52, sf: 'choir_aahs' },
   { id: 'voice', ja: '独唱', abbr: 'Vo.', fam: '声楽', clefs: ['treble'], program: 53, sf: 'voice_oohs' },
+  { id: 'drumset', ja: 'ドラムセット', abbr: 'Dr.', fam: '打楽器', clefs: ['percussion'], program: 0, sf: null, perc: true },
   { id: 'timpani', ja: 'ティンパニ', abbr: 'Timp.', fam: '打楽器', clefs: ['bass'], program: 47, sf: 'timpani' },
   { id: 'marimba', ja: 'マリンバ', abbr: 'Mar.', fam: '打楽器', clefs: ['treble', 'bass'], program: 12, sf: 'marimba' },
   { id: 'xylophone', ja: 'シロフォン', abbr: 'Xyl.', fam: '打楽器', clefs: ['treble'], program: 13, sf: 'xylophone', oct: 12, trans: { diatonic: 7, chromatic: 12 } },
@@ -61,6 +66,15 @@ export const INSTRUMENTS = [
   { id: 'glockenspiel', ja: 'グロッケンシュピール', abbr: 'Glk.', fam: '打楽器', clefs: ['treble'], program: 9, sf: 'glockenspiel', oct: 24, trans: { diatonic: 14, chromatic: 24 } },
 ];
 export const INST = Object.fromEntries(INSTRUMENTS.map(i => [i.id, i]));
+
+// 音域（KANADE が持っている音高 = 実音。ピッコロなどオクターブ移調楽器は記譜音）の [下, 上] の MIDI 番号。「音域チェック」で使う
+export const RANGES = {
+  piano: [21, 108], epiano: [28, 103], organ: [36, 96], harpsichord: [29, 89], violin: [55, 100], viola: [48, 88], cello: [36, 81], contrabass: [40, 79], harp: [24, 103],
+  guitar: [40, 88], bassguitar: [28, 67], guitarTab: [40, 88], egtrTab: [40, 88], bassTab: [28, 67],
+  piccolo: [62, 96], flute: [60, 96], oboe: [58, 91], clarinet: [50, 91], bassclarinet: [34, 77], bassoon: [34, 75], recorder: [60, 86],
+  sopsax: [56, 87], altosax: [49, 81], tenorsax: [44, 76], barisax: [36, 69], trumpet: [52, 82], horn: [34, 77], trombone: [40, 72], euphonium: [40, 72], tuba: [28, 58],
+  soprano: [60, 81], alto: [55, 77], tenor: [48, 69], bass: [40, 64], voice: [55, 81], timpani: [40, 57], marimba: [45, 96], xylophone: [65, 96], vibraphone: [53, 89], glockenspiel: [55, 84],
+};
 
 export const TEMPLATES = [
   { id: 'piano', ja: 'ピアノ', insts: ['piano'] },
@@ -70,6 +84,7 @@ export const TEMPLATES = [
   { id: 'quartet', ja: '弦楽四重奏', insts: ['violin', 'violin', 'viola', 'cello'] },
   { id: 'woodwind5', ja: '木管五重奏', insts: ['flute', 'oboe', 'clarinet', 'horn', 'bassoon'] },
   { id: 'band', ja: 'バンド（Gt/Ba/Pno）', insts: ['voice', 'guitar', 'bassguitar', 'piano'] },
+  { id: 'rock', ja: 'ロックバンド（TAB・ドラム譜）', insts: ['voice', 'egtrTab', 'bassTab', 'drumset'] },
 ];
 
 // ───────── 楽譜を作る ─────────
@@ -81,7 +96,8 @@ export function createPart(instId, nameSuffix = '') {
     name: inst.ja + nameSuffix,
     abbr: inst.abbr + nameSuffix,
     program: inst.program,
-    staves: inst.clefs.map(c => ({ clef: c, measures: [] })),
+    // TAB の譜表は中身を持たず、五線（tabOf）の音から弦とフレットを出して表示する
+    staves: inst.clefs.map(c => (c === 'tab' ? { clef: 'tab', tabOf: 0, tuning: TUNINGS[inst.tab].notes.slice(), measures: [] } : { clef: c, measures: [] })),
   };
 }
 

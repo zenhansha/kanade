@@ -7,6 +7,10 @@ import { layoutScore } from '../js/engrave/layout.js';
 import { serializeKanade, parseKanade } from '../js/io/kanade.js';
 import * as K from '../js/core/marks.js';
 import { buildPerformance } from '../js/audio/player.js';
+import * as S from '../js/core/stream.js';
+import * as MA from '../js/core/massedit.js';
+import * as PC from '../js/core/perc.js';
+import { exportMidi, importMidi } from '../js/io/midifile.js';
 
 let pass = 0, fail = 0;
 const tests = [];
@@ -384,7 +388,7 @@ test('パート譜：1パートだけを表示し、続く休みの小節を1つ
   E.enterNote(s, { p: 0, s: 0, m: 0, v: 0, t: 0 }, { type: 'whole', pitches: [C4] });
   E.enterNote(s, { p: 0, s: 0, m: 9, v: 0, t: 0 }, { type: 'whole', pitches: [C4] });
   const L = layoutScore(s, { parts: [0] });
-  eq(L.rows, [{ p: 0, s: 0 }]);
+  eq(L.rows.map(r => ({ p: r.p, s: r.s })), [{ p: 0, s: 0 }]);
   const g = L.measures[3].grp;
   eq([g.first, g.last, g.count], [1, 8, 8]);
   eq(L.measures[11].grp ? [L.measures[10].grp.first, L.measures[11].grp.last] : null, [10, 11]);
@@ -400,7 +404,7 @@ test('再生：強弱・スタッカート・8va・装飾音・反復が音に�
   K.addSpan(s, 0, 0, 0, { m: 0, t: TPQ * 2 }, { m: 0, t: TPQ * 2 }, '8va');
   K.addGrace(s, { p: 0, s: 0, m: 0, v: 0, t: TPQ * 3 }, D4, {});
   s.measures[0].repeatEnd = { times: 2 };
-  const perf = buildPerformance(s);
+  const perf = buildPerformance(s, { human: false }); // 表情付き再生の揺れを入れずに比べる
   const voice = perf.notes.filter(n => n.p === 0);
   const first = voice.filter(n => n.id === ids[0]);
   eq(first.length, 2); // 反復で2回
@@ -440,6 +444,150 @@ function makeZip(files, zlib) {
   const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16);
   return Buffer.concat([...locals, cd, end]);
 }
+
+// ═════════ Phase 3 ═════════
+const P3 = (st, oc, al = 0) => ({ step: st, alter: al, octave: oc });
+const d3 = (sc, p, st, m, v = 0) => desc(sc.parts[p].staves[st].measures[m].voices[v] || []);
+
+test('クオンタイズ：演奏のズレを16分・3連にそろえ、和音と長い音（声部2）に分ける', () => {
+  const sc = createScore({ insts: ['piano'], measures: 2 });
+  const A = measureAttrs(sc);
+  const raw = [
+    { start: 30, end: TPQ - 200, midi: 60 }, { start: TPQ + 50, end: TPQ * 1.5 - 100, midi: 62 }, { start: TPQ * 1.5 - 60, end: TPQ * 2 - 30, midi: 64 },
+    { start: TPQ * 3 + 40, end: TPQ * 5, midi: 65 },
+    { start: TPQ * 5 + 10, end: TPQ * 5 + 2200, midi: 67 }, { start: TPQ * 5 + 2250, end: TPQ * 5 + 4400, midi: 69 }, { start: TPQ * 5 + 4500, end: TPQ * 6 - 20, midi: 71 },
+    { start: TPQ * 6, end: TPQ * 8, midi: 48 }, { start: TPQ * 6, end: TPQ * 7, midi: 72 }, { start: TPQ * 7, end: TPQ * 8, midi: 74 },
+  ];
+  const [v1, v2] = S.splitVoices(S.spellNotes(S.quantize(raw, { grid: TPQ / 4, triplets: true }), A));
+  S.writeStream(sc, 0, 0, 0, v1);
+  S.writeStream(sc, 0, 0, 1, v2);
+  eq(d3(sc, 0, 0, 0), 'C4:quarter D4:eighth E4:eighth r:quarter F4:quarter~');
+  eq(d3(sc, 0, 0, 1), 'F4:quarter G4:eighth[3] A4:eighth[3] B4:eighth[3] C5:quarter D5:quarter');
+  eq(d3(sc, 0, 0, 1, 1), 'r:half C3:half');
+  // 読み出すとタイはまとまる
+  eq(S.readStream(sc, 0, 0, 0, 0, 1).map(i => (i.end - i.start) / TPQ).slice(0, 4), [1, 0.5, 0.5, 2]);
+});
+
+test('MIDI ファイル：書き出し → 読み込みで、ピアノの右手左手・ドラム（手と足）・テンポが戻る', () => {
+  const sc = createScore({ insts: ['piano', 'drumset'], measures: 2, bpm: 90 });
+  let loc = { p: 0, s: 0, m: 0, v: 0, t: 0 };
+  for (const [st, oc, ty] of [['C', 5, 'quarter'], ['E', 5, 'eighth'], ['G', 5, 'eighth'], ['C', 6, 'half']]) loc = E.enterNote(sc, loc, { type: ty, pitches: [P3(st, oc)] }).next;
+  E.enterNote(sc, { p: 0, s: 1, m: 0, v: 0, t: 0 }, { type: 'whole', pitches: [P3('C', 3), P3('G', 3)] });
+  let d = { p: 1, s: 0, m: 0, v: 0, t: 0 };
+  for (let k = 0; k < 4; k++) d = E.enterNote(sc, d, { type: 'quarter', pitches: [PC.drumPitch(k % 2 ? PC.DRUM.snare : PC.DRUM.kick), PC.drumPitch(PC.DRUM.hh)] }).next;
+  const bytes = exportMidi(sc);
+  eq([...bytes.slice(0, 4)].map(c => String.fromCharCode(c)).join(''), 'MThd');
+  const back = importMidi(bytes);
+  eq(back.parts.map(p => p.inst), ['piano', 'drumset']);
+  eq(back.measures[0].tempo.bpm, 90);
+  eq(d3(back, 0, 0, 0), 'C5:quarter E5:eighth G5:eighth C6:half');
+  eq(d3(back, 0, 1, 0), 'C3+G3:whole');
+  const dr = (v) => back.parts[1].staves[0].measures[0].voices[v].map(e => e.notes.map(n => n.drum).join('+') || 'r').join(' ');
+  eq(dr(0), 'hh snare+hh hh snare+hh');
+  eq(dr(1), 'kick r kick r');
+});
+
+test('一括編集：音程で移調（調号・コードも）、音価2倍で後ろが押し出される、逆行', () => {
+  const mk = () => {
+    const sc = createScore({ insts: ['violin', 'violin', 'viola'], measures: 4 });
+    let loc = { p: 0, s: 0, m: 0, v: 0, t: 0 };
+    for (const [ps, ty] of [[[P3('C', 5), P3('E', 5), P3('G', 5)], 'quarter'], [[P3('D', 5), P3('F', 5, 1)], 'eighth'], [[P3('E', 5)], 'eighth'], [[P3('F', 5), P3('A', 5)], 'half'], [[P3('G', 5)], 'whole']]) loc = E.enterNote(sc, loc, { type: ty, pitches: ps }).next;
+    return sc;
+  };
+  let sc = mk();
+  K.addDir(sc, 0, 0, 0, { t: 0, k: 'chord', text: 'C' });
+  MA.transposeBy(sc, { m1: 0, m2: 3, staves: [[0, 0]] }, 1, 2, { keys: true });
+  eq(d3(sc, 0, 0, 0), 'D5+F♯5+A5:quarter E5+G♯5:eighth F♯5:eighth G5+B5:half');
+  eq(sc.measures[0].key.fifths, 2);
+  eq(sc.parts[0].staves[0].measures[0].dirs[0].text, 'D');
+  sc = mk(); MA.scaleDurations(sc, { m1: 0, m2: 0, staves: [[0, 0]] }, 2);
+  eq([0, 1, 2].map(m => d3(sc, 0, 0, m)), ['C5+E5+G5:half D5+F♯5:quarter E5:quarter', 'F5+A5:whole', 'G5:whole']);
+  sc = mk(); MA.scaleDurations(sc, { m1: 0, m2: 1, staves: [[0, 0]] }, 0.5);
+  eq([0, 1].map(m => d3(sc, 0, 0, m)), ['C5+E5+G5:eighth D5+F♯5:16th E5:16th F5+A5:quarter G5:half', 'r:whole(mr)']);
+  sc = mk(); MA.retrograde(sc, { m1: 0, m2: 0, staves: [[0, 0]] });
+  eq(d3(sc, 0, 0, 0), 'F5+A5:half E5:eighth D5+F♯5:eighth C5+E5+G5:quarter');
+  sc = mk(); eq(MA.respell(sc, { m1: 0, m2: 0, staves: [[0, 0]] }), 1);
+  eq(d3(sc, 0, 0, 0).includes('G♭5'), true);
+});
+
+test('エクスプロード / インプロード・項目を選んで消去', () => {
+  const sc = createScore({ insts: ['violin', 'violin', 'viola'], measures: 2 });
+  E.enterNote(sc, { p: 0, s: 0, m: 0, v: 0, t: 0 }, { type: 'half', pitches: [P3('C', 5), P3('E', 5), P3('G', 5)] });
+  E.enterNote(sc, { p: 0, s: 0, m: 0, v: 0, t: TPQ * 2 }, { type: 'half', pitches: [P3('D', 5), P3('F', 5)] });
+  const rows = [{ p: 0, s: 0 }, { p: 1, s: 0 }, { p: 2, s: 0 }];
+  MA.explode(sc, { m1: 0, m2: 0, staves: [[0, 0]] }, rows);
+  eq([0, 1, 2].map(p => d3(sc, p, 0, 0)), ['G5:half F5:half', 'E5:half D5:half', 'C5:half r:half']);
+  MA.implode(sc, { m1: 0, m2: 0, staves: [[1, 0], [2, 0]] });
+  eq(d3(sc, 1, 0, 0), 'C5+E5:half D5:half');
+  MA.setArticAll(sc, { m1: 0, m2: 0, staves: [[0, 0]] }, 'acc');
+  K.addDir(sc, 0, 0, 0, { t: 0, k: 'dyn', v: 'f' });
+  MA.clearItems(sc, { m1: 0, m2: 0, staves: [[0, 0]] }, { art: true, dyn: true });
+  eq(sc.parts[0].staves[0].measures[0].voices[0].some(e => e.art), false);
+  eq(sc.parts[0].staves[0].measures[0].dirs, undefined);
+});
+
+test('ドラム譜と TAB 譜：浄書（×の符頭・フレット番号）と MusicXML の往復', () => {
+  const sc = createScore({ insts: ['egtrTab', 'drumset'], measures: 2 });
+  E.enterNote(sc, { p: 0, s: 0, m: 0, v: 0, t: 0 }, { type: 'quarter', pitches: [P3('E', 3), P3('B', 3), P3('E', 4)] });
+  E.enterNote(sc, { p: 0, s: 0, m: 0, v: 0, t: TPQ }, { type: 'quarter', pitches: [{ ...P3('A', 3), str: 4 }] });
+  E.enterNote(sc, { p: 1, s: 0, m: 0, v: 0, t: 0 }, { type: 'quarter', pitches: [PC.drumPitch(PC.DRUM.hh), PC.drumPitch(PC.DRUM.snare)] });
+  eq(PC.tabFrets([P3('E', 3), P3('B', 3), P3('E', 4)], PC.TUNINGS.guitar.notes), [{ str: 4, fret: 2 }, { str: 2, fret: 0 }, { str: 1, fret: 0 }]);
+  eq(PC.tabFrets([{ ...P3('A', 3), str: 4 }], PC.TUNINGS.guitar.notes), [{ str: 4, fret: 7 }]);
+  const L = layoutScore(sc);
+  eq(L.rows.map(r => r.kind), ['std', 'tab', 'perc']);
+  eq(L.rows[1].h, 7.5);
+  const svg = L.pages.map(p => p.svg).join('');
+  eq((svg.match(/tabn/g) || []).length, 4);
+  eq(svg.includes(SMUFL_X()), true);
+  // MusicXML：ドラムは unpitched＋楽器、TAB は staff-details と string/fret
+  const xml = exportMusicXML(sc);
+  eq(/<unpitched><display-step>G<\/display-step><display-octave>5<\/display-octave><\/unpitched>/.test(xml), true);
+  eq(/<staff-lines>6<\/staff-lines>/.test(xml) && /<string>4<\/string><fret>7<\/fret>/.test(xml), true);
+  const back = importMusicXML(xml);
+  eq(back.parts[0].staves.map(st => st.clef + (st.tabOf != null ? '→' + st.tabOf : '')), ['treble8vb', 'tab→0']);
+  eq(back.parts[0].staves[1].tuning, PC.TUNINGS.guitar.notes);
+  eq(back.parts[1].inst, 'drumset');
+  eq(back.parts[1].staves[0].measures[0].voices[0][0].notes.map(n => n.drum).sort(), ['hh', 'snare']);
+});
+const SMUFL_X = () => '\uE0A9';
+
+test('表情付き再生：rit. で遅くなる・スウィング・ミュート/ソロ・メトロノーム', () => {
+  const mk = () => {
+    const sc = createScore({ insts: ['flute', 'oboe'], measures: 3, bpm: 120 });
+    let loc = { p: 0, s: 0, m: 0, v: 0, t: 0 };
+    for (let k = 0; k < 24; k++) loc = E.enterNote(sc, loc, { type: 'eighth', pitches: [P3('C', 5)] }).next;
+    return sc;
+  };
+  let sc = mk();
+  const plain = buildPerformance(sc, { human: false });
+  eq(+plain.total.toFixed(3), 8); // 入れ終わると小節が1つ増えて4小節
+  eq(plain.clicks.length, 16);
+  K.addDir(sc, 0, 0, 1, { t: 0, k: 'text', text: 'rit.' });
+  const rit = buildPerformance(sc);
+  eq(rit.total > 8.5, true);
+  sc = mk(); sc.settings.playback = { human: false, swing: 1 };
+  const sw = buildPerformance(sc).notes.filter(n => n.p === 0);
+  eq(+(sw[1].start - sw[0].start).toFixed(3), 0.333); // 2:1 に跳ねる
+  sc = mk(); sc.parts[0].mix = { mute: true };
+  eq(buildPerformance(sc).notes.filter(n => n.p === 0).length, 0);
+  sc.parts[1].mix = { solo: true }; sc.parts[0].mix = {};
+  eq(buildPerformance(sc).notes.filter(n => n.p === 0).length, 0);
+});
+
+test('ページレイアウト：1段の小節数・前の段へ（keep）・改ページ・段とパートの間隔', () => {
+  const sc = createScore({ insts: ['piano'], measures: 12 });
+  sc.settings.layout = { perSystem: 3 };
+  let L = layoutScore(sc);
+  eq(L.systems.map(x => x.ms.length), [3, 3, 3, 3]);
+  sc.measures[2].keep = true; sc.measures[3].sysBreak = true;
+  L = layoutScore(sc);
+  eq(L.systems[0].ms, [0, 1, 2, 3]);
+  sc.measures[3].pageBreak = true;
+  L = layoutScore(sc);
+  eq(L.systems[1].page, 1);
+  const gap = (lay) => { sc.settings.layout = lay; const L2 = layoutScore(sc); return L2.systems[0].staffYs[1] - L2.systems[0].staffYs[0]; };
+  eq(gap({ staffGap: 12 }) > gap({ staffGap: 6.5 }), true);
+});
 
 for (const [name, fn] of tests) {
   try { await fn(); pass++; console.log("  ✔", name); }

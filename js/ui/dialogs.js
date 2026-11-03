@@ -80,6 +80,9 @@ export class Dialogs {
       '-',
       { label: 'MusicXML を読み込む…（Finale から）', run: () => a.openFileDialog() },
       { label: 'MusicXML に書き出す', kbd: 'Ctrl+E', run: () => a.exportXML() },
+      { label: 'MIDI ファイルを読み込む…（.mid）', run: () => a.openFileDialog() },
+      { label: 'MIDI ファイルに書き出す', run: () => a.tools.exportMidi() },
+      { label: 'オーディオ（WAV）に書き出す', run: () => a.tools.exportWav() },
       { label: '印刷 / PDF に保存', kbd: 'Ctrl+P', run: () => a.print() },
       '-',
       ...(a.isInstalled ? [] : [{ label: 'アプリとしてインストール…', run: () => a.install() }]),
@@ -243,7 +246,12 @@ export class Dialogs {
       '-',
       { label: '弱起（アウフタクト）の設定…', run: () => this.pickup() },
       { label: '反復記号・カッコ・D.S. / Coda…', run: () => this.repeats(m) },
-      { label: (a.score.measures[m].sysBreak ? '✓ ' : '') + 'この小節の後で改段', run: () => a.edit('改段', () => { a.score.measures[m].sysBreak = !a.score.measures[m].sysBreak; }) },
+      { label: (a.score.measures[m].sysBreak ? '✓ ' : '') + 'この小節の後で改段', run: () => a.edit('改段', () => { a.score.measures[m].sysBreak = !a.score.measures[m].sysBreak; delete a.score.measures[m].keep; }) },
+      { label: (a.score.measures[m].pageBreak ? '✓ ' : '') + 'この小節の後で改ページ', run: () => a.edit('改ページ', () => { const x = a.score.measures[m]; x.pageBreak = !x.pageBreak; if (x.pageBreak) { x.sysBreak = true; delete x.keep; } else delete x.pageBreak; }) },
+      { label: 'この段の最初の小節を前の段へ', run: () => a.tools.moveSystem(m, -1) },
+      { label: 'この段の最後の小節を次の段へ', run: () => a.tools.moveSystem(m, 1) },
+      ...(a.state.sel?.kind === 'range' && a.state.sel.m2 > a.state.sel.m1 ? [{ label: `第${a.state.sel.m1 + 1}〜${a.state.sel.m2 + 1}小節を1段にまとめる`, run: () => a.tools.lockSystem(a.state.sel.m1, a.state.sel.m2) }] : []),
+      { label: 'この段の上を広げる / 狭める…', run: () => { const x = a.score.measures[a.L.systems[a.L.measures[m].sys].ms[0]]; const v = prompt('この段の上に足す間隔（譜線間隔。0 で元に戻す。マイナスで狭める）', x.sysSpace || 0); if (v != null && Number.isFinite(+v)) a.edit('段の間隔', () => { if (+v) x.sysSpace = +v; else delete x.sysSpace; }); } },
       { label: '小節線：' + ({ final: '終止線', double: '複縦線' }[a.score.measures[m].barline] || '通常') + ' → 切り替え', run: () => a.edit('小節線', () => { const ms = a.score.measures[m]; ms.barline = !ms.barline ? 'double' : ms.barline === 'double' ? 'final' : undefined; if (!ms.barline) delete ms.barline; }) },
     ]);
   }
@@ -491,6 +499,8 @@ export class Dialogs {
       { label: 'スコア情報（タイトル・作曲者）…', run: () => this.scoreInfo() },
       { label: '楽器の追加・削除・並べ替え…', run: () => this.instruments() },
       { label: '譜表サイズ・ページ設定…', run: () => this.pageSetup() },
+      { label: 'ページレイアウト（段の間隔・1段の小節数・余白）…', run: () => this.app.tools.pageLayout() },
+      { label: '再生の設定・ミキサー…', run: () => this.app.tools.playback() },
     ]);
   }
 
@@ -609,6 +619,15 @@ export class Dialogs {
         <h3>表示（上のバーの「表示」）</h3>
         <p>・<b>パート譜</b>：パートを1つ選ぶとそのパートだけの楽譜になり、続く休みの小節は1つにまとまります（リンクパート：スコアと同じデータなので、どちらで直しても両方に反映されます）。<br>
         ・<b>記譜音で表示</b>：B♭クラリネットやアルトサックスなどを、奏者が読む高さ（調号も）で表示します。画面のタップや音名キーは見えている高さで入り、MIDI キーボードと画面鍵盤は鳴る高さ（実音）で入ります。</p>
+        <h3>Phase 3 の機能（上のバーの「ツール」と ●）</h3>
+        <p>・<b>リアルタイム入力（HyperScribe）</b>：● ボタン。メトロノーム（とほかのパートの伴奏）に合わせて MIDI キーボードや画面鍵盤を弾き、スペースか ■ で止めると、16分・3連などにそろえて楽譜になります。ピアノは分割点で右手・左手に分かれます。<br>
+        ・<b>MIDI ファイル</b>：.mid を開くと楽譜に変換（10ch はドラム譜）。「ツール → MIDI に書き出す」で反復・強弱込みの演奏を DAW へ。<b>WAV</b> にも書き出せます。<br>
+        ・<b>一括編集</b>：小節を範囲選択して「ツール」か右クリック → 移調（音程指定・調号も）、音価を2倍/半分、逆行、アーティキュレーションをまとめて付ける、項目を選んで消去、異名同音、<b>エクスプロード</b>（和音を下の譜表へ分ける）、<b>インプロード</b>（複数の譜表を1段の和音に）。<br>
+        ・<b>ドラム譜</b>：楽器「ドラムセット」。五線の位置でドラムが決まり（ハイハットは ×）、MIDI キーボードは GM ドラムの鍵盤で入ります。右クリック →「ドラムの種類」で変更。<br>
+        ・<b>TAB 譜</b>：楽器「ギター（五線＋TAB）」など。五線に入れた音の弦とフレットを自動で表示します。TAB の弦をタップすると開放弦の音が入り、↑↓ でフレットが変わります。右クリック →「弦の指定」。<br>
+        ・<b>表情付き再生</b>：rit.・accel.・a tempo などの文字、スウィング、拍の強弱、人間らしい揺れ（「ツール → 再生の設定」）。ミキサー（音量・左右・ミュート・ソロ）、メトロノーム、外部 MIDI 音源での再生も。<br>
+        ・<b>ページレイアウト</b>：「スコア → ページレイアウト」で段の間隔・1段の小節数・余白。小節メニューで「前の段へ / 次の段へ / 改ページ / 1段にまとめる」。<br>
+        ・<b>音域チェック</b>：「ツール → 音域チェック」で、楽器の音域から外れた音を赤く表示します。</p>
         <h3>PC（マウス）で使うとき</h3>
         <p>・<b>ドラッグ</b>で小節の範囲選択、<b>右クリック</b>でその場のメニュー（コピー・移調・拍子や調の変更など）、<b>ダブルクリック</b>でそこから入力。<br>
         ・<b>Ctrl+ホイール</b>で拡大縮小、<b>Ctrl+0</b> で画面に合わせる（大きな画面ではページを横に並べます）。<br>

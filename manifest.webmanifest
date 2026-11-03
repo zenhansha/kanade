@@ -21,7 +21,8 @@
       "accept": {
         "application/x-kanade+json": [".kanade"],
         "application/vnd.recordare.musicxml+xml": [".musicxml"],
-        "application/vnd.recordare.musicxml": [".mxl"]
+        "application/vnd.recordare.musicxml": [".mxl"],
+        "audio/midi": [".mid", ".midi"]
       }
     }
   ],

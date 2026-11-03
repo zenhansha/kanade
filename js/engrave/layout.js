@@ -14,9 +14,15 @@
 //
 // opts.parts = [p]   パート譜（そのパートだけを表示し、続く休みの小節を1つにまとめる）
 // opts.transposed    移調楽器を記譜音で表示（false なら実音＝コンサートピッチ）
+// opts.rangeCheck    楽器の音域から外れた音を赤く表示（Phase 3）
+//
+// Phase 3：ドラム譜（打楽器記号・×の符頭・符尾は上）と TAB 譜（弦の数の線にフレット番号。中身は上の五線から作る）、
+//          ページレイアウト（段の間隔・パートの間隔・1段の小節数・改ページ・前の段へ/次の段へ）
 import { SMUFL } from '../smufl.js';
 import { TPQ, TYPE_FLAGS, CLEFS, keyAlter, diatonic, isCompound, beatTicks } from '../core/music.js';
-import { measureAttrs, staffList, clefAt, evTicks, INST } from '../core/score.js';
+import { measureAttrs, staffList, clefAt, evTicks, INST, RANGES } from '../core/score.js';
+import { midiOf } from '../core/music.js';
+import { DRUM, drumOf, tabFrets } from '../core/perc.js';
 import { positions } from '../core/edit.js';
 import { ARTICS, DYNAMICS, SPANS, JUMPS, parseChord, partTrans, writtenFifths, writtenScore } from '../core/marks.js';
 
@@ -39,6 +45,12 @@ const GHW = gw('noteheadBlack') * GS;  // 装飾音符の符頭の幅
 const NEAR_ORDER = ['stacc', 'staccss', 'ten', 'acc'];
 const LYR = 2.2, CHORD = 2.5, TXT = 2.2;   // 文字の大きさ（sp）
 const MR_W = 10;                            // まとめた休み（複数小節休符）の幅
+const TAB_SP = 1.5;                         // TAB 譜の線の間隔（sp）
+const DRUM_HEAD = {
+  x: { black: 'noteheadXBlack', half: 'noteheadXHalf', whole: 'noteheadXWhole' },
+  circlex: { black: 'noteheadCircleX', half: 'noteheadCircleX', whole: 'noteheadCircleX' },
+  diamond: { black: 'noteheadDiamondBlack', half: 'noteheadDiamondWhite', whole: 'noteheadDiamondWhite' },
+};
 
 // 音符間の理想的な間隔（長さの 0.6 乗に比例。2倍長い音符でも間隔は約1.5倍）
 const ideal = (d) => 1.3 + 2.2 * Math.pow(d / TPQ, 0.6);
@@ -129,7 +141,9 @@ function beamGroups(pes, time) {
   return groups.filter(g => g.members.length > 1);
 }
 
-function prepStaffMeasure(sm, attr, clefKey, prevLast) {
+function prepStaffMeasure(sm, attr, clefKey, prevLast, kind = 'std') {
+  if (kind === 'tab') return { multi: false, voices: [], tab: true };
+  const perc = kind === 'perc';
   const clef = CLEFS[clefKey] || CLEFS.treble;
   const active = [];
   sm.voices.forEach((v, i) => { if (v && v.length) active.push(i); });
@@ -179,16 +193,23 @@ function prepStaffMeasure(sm, attr, clefKey, prevLast) {
     const pes = res.voices[v];
     const groups = beamGroups(pes, attr.time);
     for (const g of groups) {
-      const up = multi ? v % 2 === 0 : autoUp(g.members.flatMap(pe => pe.notes.map(n => n.pos)));
+      const up = multi ? v % 2 === 0 : perc ? true : autoUp(g.members.flatMap(pe => pe.notes.map(n => n.pos)));
       g.up = up; g.v = v;
       g.members.forEach(pe => { pe.beam = g; pe.up = up; });
     }
     res.voices[v].groups = groups;
     for (const pe of pes) {
       if (pe.rest || pe.beam) continue;
-      pe.up = multi ? v % 2 === 0 : autoUp(pe.notes.map(n => n.pos));
+      pe.up = multi ? v % 2 === 0 : perc ? true : autoUp(pe.notes.map(n => n.pos));
     }
-    for (const pe of pes) finishPE(pe, multi);
+    for (const pe of pes) {
+      finishPE(pe, multi);
+      // ドラム：× や ◇ の符頭は音ごと（ハイハット × とスネア ● が同じ和音にあることもある）
+      if (perc && !pe.rest) for (const nt of pe.notes) {
+        const h = DRUM_HEAD[drumOf(nt.n).head];
+        if (h) nt.headG = h[pe.type === 'whole' || pe.type === 'breve' ? 'whole' : pe.type === 'half' ? 'half' : 'black'];
+      }
+    }
   }
   return res;
 }
@@ -268,12 +289,18 @@ export function layoutScore(score0, opts = {}) {
   const pageW = score.settings.page.w / spMm, pageH = score.settings.page.h / spMm;
   const mg = { t: score.settings.margin.t / spMm, b: score.settings.margin.b / spMm, l: score.settings.margin.l / spMm, r: score.settings.margin.r / spMm };
   const shown = showParts ? showParts.map(p => score.parts[p]) : score.parts;
+  const LY = { sysGap: 7, staffGap: 6.5, partGap: 7.5, ...(score.settings.layout || {}) };
+  // 譜表の種類：std = 普通の五線、perc = ドラム譜、tab = TAB 譜（高さが違う）
+  const rowKind = SL.map(row => (row.staff.tabOf != null ? 'tab' : row.staff.clef === 'percussion' ? 'perc' : 'std'));
+  const rowH = SL.map((row, r) => (rowKind[r] === 'tab' ? ((row.staff.tuning || [0, 0, 0, 0, 0, 0]).length - 1) * TAB_SP : 4));
+  const tabSrc = SL.map((row, r) => (rowKind[r] === 'tab' ? SL.findIndex(x => x.p === row.p && x.s === row.staff.tabOf) : -1));
+  const range = SL.map(row => (opts.rangeCheck ? RANGES[row.part.inst] || null : null));
 
   // 記譜音で表示するときは、移調楽器の譜表だけ調号が変わる
   const rowTrans = SL.map(row => (opts.transposed ? partTrans(score0.parts[row.p]) : null));
-  const fifthsR = (r, m) => writtenFifths(A[m].fifths, rowTrans[r]);
-  const prevFifthsR = (r, m) => writtenFifths(A[m].prevFifths, rowTrans[r]);
-  const attrR = (r, m) => (rowTrans[r] ? { ...A[m], fifths: fifthsR(r, m), prevFifths: prevFifthsR(r, m) } : A[m]);
+  const fifthsR = (r, m) => (rowKind[r] !== 'std' ? 0 : writtenFifths(A[m].fifths, rowTrans[r]));
+  const prevFifthsR = (r, m) => (rowKind[r] !== 'std' ? 0 : writtenFifths(A[m].prevFifths, rowTrans[r]));
+  const attrR = (r, m) => (rowTrans[r] || rowKind[r] !== 'std' ? { ...A[m], fifths: fifthsR(r, m), prevFifths: prevFifthsR(r, m) } : A[m]);
   const keyW = (m, withCancel) => Math.max(0, ...SL.map((row, r) => keyItemsWidth(keySigItems(fifthsR(r, m), prevFifthsR(r, m), 'treble', withCancel))));
 
   // ── 1. prep ──
@@ -286,7 +313,7 @@ export function layoutScore(score0, opts = {}) {
       const ck = clefAt(row.staff, m);
       clefs[m][r] = ck;
       const sm = row.staff.measures[m];
-      const pr = prepStaffMeasure(sm, attrR(r, m), ck, prevLast[r]);
+      const pr = prepStaffMeasure(sm, attrR(r, m), ck, prevLast[r], rowKind[r]);
       prep[m][r] = pr;
       pr.voices.forEach((pes, v) => { if (pes && pes.length) prevLast[r][v] = pes[pes.length - 1]; });
       // 使われていない声部は「前の最後」を消す（タイの誤判定を防ぐ）
@@ -399,7 +426,9 @@ export function layoutScore(score0, opts = {}) {
     let j = i;
     while (j < M) {
       const w = unitW(j, i);
-      if (ms.length && used + w > avail) break;
+      // keep = 次の小節と同じ段にする（「前の段へ」で付く）。perSystem = 1段の小節数を決めている
+      const forced = j > i && score.measures[j - 1].keep;
+      if (ms.length && !forced && (used + w > avail || (LY.perSystem > 0 && !showParts && ms.length >= LY.perSystem))) break;
       const g = mrGroups[j];
       if (g) { for (let q = g.first; q <= g.last; q++) ms.push(q); j = g.last + 1; } else { ms.push(j); j++; }
       used += w;
@@ -413,7 +442,8 @@ export function layoutScore(score0, opts = {}) {
     const last = k === systems.length - 1;
     let extra = sy.avail - sy.used;
     if (last && sy.used < sy.avail * 0.6) extra = 0;
-    if (extra < 0) extra = 0;
+    // 詰め込みすぎた段（keep や 1段の小節数の指定）は、間隔を縮めて入れる
+    if (extra < 0) extra = Math.max(extra, -sy.used * 0.45);
     let x = sy.x0 + sy.hdr;
     let firstUnit = true;
     sy.ms.forEach((m) => {
@@ -437,13 +467,13 @@ export function layoutScore(score0, opts = {}) {
 
   // ── 4. draw ──
   const evGeom = {};
-  const rowsOut = systems.map(() => SL.map(() => ({ s: [], top: -1, bot: 5 })));
+  const rowsOut = systems.map(() => SL.map((_, r) => ({ s: [], top: -1, bot: rowH[r] + 1 })));
   const ext = (k, r, top, bot) => { const o = rowsOut[k][r]; o.top = Math.min(o.top, top); o.bot = Math.max(o.bot, bot); };
   // スカイライン：置いたものの外枠。あとから置く記号は、この上（下）にぶつからない高さを探す
   const sky = systems.map(() => SL.map(() => []));
   const box = (k, r, x0, x1, top, bot) => { sky[k][r].push({ x0, x1, t: top, b: bot }); ext(k, r, top, bot); };
   const skyTop = (k, r, x0, x1) => { let y = 0; for (const b of sky[k][r]) if (b.x1 > x0 && b.x0 < x1) y = Math.min(y, b.t); return y; };
-  const skyBot = (k, r, x0, x1) => { let y = 4; for (const b of sky[k][r]) if (b.x1 > x0 && b.x0 < x1) y = Math.max(y, b.b); return y; };
+  const skyBot = (k, r, x0, x1) => { let y = rowH[r]; for (const b of sky[k][r]) if (b.x1 > x0 && b.x0 < x1) y = Math.max(y, b.b); return y; };
   const tieReqs = [];
   const onsetMap = new Map(); // `${r}:${m}:${t}` → その位置の音符たち
   const marks = []; // 選べる記号の位置（強弱・線・歌詞など）
@@ -454,17 +484,24 @@ export function layoutScore(score0, opts = {}) {
       const out = rowsOut[k][r].s;
       // 五線
       let d = '';
-      for (let i = 0; i < 5; i++) d += `M${f(sy.x0)} ${i}H${f(MS[sy.ms[sy.ms.length - 1]].geo.x1)}`;
+      const nLines = rowKind[r] === 'tab' ? (row.staff.tuning || []).length || 6 : 5, lsp = rowKind[r] === 'tab' ? TAB_SP : 1;
+      for (let i = 0; i < nLines; i++) d += `M${f(sy.x0)} ${f(i * lsp)}H${f(MS[sy.ms[sy.ms.length - 1]].geo.x1)}`;
       out.push(`<path class="staff" d="${d}" stroke-width="${LINE_W}"/>`);
       // 段の頭：音部記号・調号・拍子
       let hx = sy.x0 + 0.7;
       const ck = clefs[m0][r];
       const ci = CLEFS[ck] || CLEFS.treble;
-      out.push(glyph(ci.glyph, hx, yOf(ci.glyphPos)));
-      hx += gw(ci.glyph) + 0.9;
+      if (rowKind[r] === 'tab') {
+        const tg = nLines <= 4 ? '4stringTabClef' : '6stringTabClef';
+        out.push(glyph(tg, hx, rowH[r] / 2));
+        hx += gw(tg) + 0.9;
+      } else {
+        out.push(glyph(ci.glyph, hx, yOf(ci.glyphPos)));
+        hx += gw(ci.glyph) + 0.9;
+      }
       const ks = keySigItems(fifthsR(r, m0), prevFifthsR(r, m0), ck, m0 > 0 && !!score.measures[m0].key);
       if (ks.length) { for (const it of ks) { out.push(glyph(it.g, hx, yOf(it.pos))); hx += gw(it.g) + 0.12; } hx += 0.6; }
-      if (A[m0].timeChanged) drawTime(out, A[m0].time, hx);
+      if (A[m0].timeChanged) drawTime(out, A[m0].time, hx, (rowH[r] - 4) / 2);
 
       sy.ms.forEach((m, idx) => {
         const geo = MS[m].geo;
@@ -473,30 +510,52 @@ export function layoutScore(score0, opts = {}) {
         if (idx > 0 && geo.chg) {
           let x = geo.x0 + 0.5;
           const sm = row.staff.measures[m];
-          if (sm.clef) { const c2 = CLEFS[sm.clef]; out.push(glyph(c2.glyph, x, yOf(c2.glyphPos), 'gs')); }
+          if (sm.clef && rowKind[r] !== 'tab') { const c2 = CLEFS[sm.clef]; out.push(glyph(c2.glyph, x, yOf(c2.glyphPos), 'gs')); }
           if (SL.some(rr => rr.staff.measures[m]?.clef)) x += 2.4;
           if (score.measures[m].key) {
             for (const it of keySigItems(fifthsR(r, m), prevFifthsR(r, m), clefs[m][r], true)) { out.push(glyph(it.g, x, yOf(it.pos))); x += gw(it.g) + 0.12; }
             x += 0.6;
           }
-          if (score.measures[m].time) drawTime(out, A[m].time, x);
+          if (score.measures[m].time) drawTime(out, A[m].time, x, (rowH[r] - 4) / 2);
         }
+        if (rowKind[r] === 'tab') { if (!geo.grp) drawTabMeasure(out, k, r, row, m); return; }
         if (geo.grp) { drawMultiRest(out, k, r, row, m, geo); return; }
         drawMeasure(out, k, r, row, m, geo);
       });
     });
   });
 
-  function drawTime(out, time, x) {
+  function drawTime(out, time, x, dy = 0) {
     const t = timeSigGlyphs(time);
-    if (t.common) { out.push(glyph(t.common, x, 2)); return; }
+    if (t.common) { out.push(glyph(t.common, x, 2 + dy)); return; }
     const w = timeSigWidth(time);
     const put = (arr, y) => {
       let tw = arr.reduce((a, g) => a + gw(g), 0);
       let xx = x + (w - tw) / 2;
       for (const g of arr) { out.push(glyph(g, xx, y)); xx += gw(g); }
     };
-    put(t.top, 1); put(t.bot, 3);
+    put(t.top, 1 + dy); put(t.bot, 3 + dy);
+  }
+
+  // TAB：上の五線の音符と同じ位置に、弦の線の上にフレット番号を書く（タイの続きは書かない）
+  function drawTabMeasure(out, k, r, row, m) {
+    const rs = tabSrc[r];
+    if (rs < 0) return;
+    const pr = prep[m][rs];
+    const tuning = row.staff.tuning || [64, 59, 55, 50, 45, 40];
+    for (const pes of pr.voices) for (const pe of pes || []) {
+      if (pe.rest || !pe.geom) continue;
+      const frets = tabFrets(pe.notes.map(nt => nt.n), tuning);
+      const xc = pe.geom.x + pe.headW / 2;
+      pe.notes.forEach((nt, i) => {
+        const fr = frets[i];
+        if (!fr || nt.tiedIn) return;
+        const y = (fr.str - 1) * TAB_SP;
+        const label = String(fr.fret), w = label.length * 0.75 + 0.3;
+        out.push(`<g class="ev v${pe.v} tabn" data-id="${pe.id}"><rect class="tabbg" x="${f(xc - w / 2)}" y="${f(y - 0.7)}" width="${f(w)}" height="1.4"/>${text(label, xc, y + 0.55, 1.6, ' text-anchor="middle" font-family="Arial,Helvetica,sans-serif"')}</g>`);
+        box(k, r, xc - w / 2, xc + w / 2, y - 0.7, y + 0.7);
+      });
+    }
   }
 
   function onsetX(geo, t) {
@@ -560,7 +619,8 @@ export function layoutScore(score0, opts = {}) {
       for (let L = -6; L >= bot; L -= 2) g.push(line(minX, yOf(L), maxX, yOf(L), LEDGER_W, 'ledger'));
       for (const n of ns) {
         const y = yOf(n.pos);
-        g.push(glyph(pe.headG, x + n.dx, y));
+        const rg = range[r], cm = rg ? midiOf(n.n) + (rowTrans[r]?.chromatic || 0) : 0;
+        g.push(glyph(n.headG || pe.headG, x + n.dx, y, rg && (cm < rg[0] || cm > rg[1]) ? 'oor' : ''));
         if (n.acc) g.push(glyph(n.acc, x + n.accX, y));
         geom.notes.push({ pos: n.pos, y, hx: x + n.dx, k: n.k, n: n.n });
       }
@@ -1217,7 +1277,7 @@ export function layoutScore(score0, opts = {}) {
   });
 
   // ═════════ 6. 縦の配置とページ割り ═════════
-  const rowGapIn = 6.5, rowGapPart = 7.5, sysGap = 7;
+  const rowGapIn = LY.staffGap, rowGapPart = LY.partGap, sysGap = LY.sysGap;
   const sysBlocks = systems.map((sy, k) => {
     const rows = rowsOut[k];
     const ys = [];
@@ -1226,11 +1286,11 @@ export function layoutScore(score0, opts = {}) {
       if (r > 0) {
         const prev = rows[r - 1];
         const def = SL[r - 1].p === row.p ? rowGapIn : rowGapPart;
-        y += 4 + Math.max(def, prev.bot - 4 + -rows[r].top + 1.2);
+        y += rowH[r - 1] + Math.max(def, prev.bot - rowH[r - 1] + -rows[r].top + 1.2);
       }
       ys.push(y);
     });
-    const height = ys[ys.length - 1] + Math.max(4, rows[rows.length - 1].bot);
+    const height = ys[ys.length - 1] + Math.max(rowH[rows.length - 1], rows[rows.length - 1].bot);
     return { ys, height };
   });
 
@@ -1256,7 +1316,10 @@ export function layoutScore(score0, opts = {}) {
   let cy = y + (head.length ? 5 : 2);
   systems.forEach((sy, k) => {
     const blk = sysBlocks[k];
-    if (cur.sys.length && cy + blk.height > contentBottom) { newPage(); cy = mg.t + 2; }
+    const prevSys = systems[k - 1];
+    const forcedPage = prevSys && !showParts && score.measures[prevSys.ms[prevSys.ms.length - 1]].pageBreak;
+    if (cur.sys.length && (cy + blk.height > contentBottom || forcedPage)) { newPage(); cy = mg.t + 2; }
+    if (score.measures[sy.first]?.sysSpace) cy += score.measures[sy.first].sysSpace;
     cur.sys.push({ k, y: cy });
     cy += blk.height + sysGap;
   });
@@ -1268,6 +1331,8 @@ export function layoutScore(score0, opts = {}) {
     const free = contentBottom - usedBottom;
     const isLast = pi === pages.length - 1;
     if (isLast && free > (contentBottom - pg.sys[0].y) * 0.35) return;
+    if (LY.spread === false) return;
+    if (score.measures[systems[lastS.k].ms[systems[lastS.k].ms.length - 1]].pageBreak && free > (contentBottom - pg.sys[0].y) * 0.35) return;
     const add = Math.min(free / (pg.sys.length - 1), 12);
     pg.sys.forEach((s, i) => (s.y += add * i));
   });
@@ -1279,6 +1344,7 @@ export function layoutScore(score0, opts = {}) {
     parts.push(`<rect class="paper" x="0" y="0" width="${f(pageW)}" height="${f(pageH)}"/>`);
     if (pi === 0) parts.push(...pg.head);
     else parts.push(`<text class="t pnum" x="${f(pi % 2 ? right : mg.l)}" y="${f(mg.t - 2)}" font-size="2" text-anchor="${pi % 2 ? 'end' : 'start'}">${pi + 1}</text>`);
+    if (pi === 0 && meta.copyright) parts.push(`<text class="t copyright" x="${f(pageW / 2)}" y="${f(pageH - mg.b / 2)}" font-size="1.6" text-anchor="middle">${esc(meta.copyright)}</text>`);
     for (const ps of pg.sys) {
       const sy = systems[ps.k];
       const blk = sysBlocks[ps.k];
@@ -1291,12 +1357,12 @@ export function layoutScore(score0, opts = {}) {
   });
 
   function drawSystemFrame(parts, k, sy, staffYs) {
-    const topY = staffYs[0], botY = staffYs[staffYs.length - 1] + 4;
+    const topY = staffYs[0], botY = staffYs[staffYs.length - 1] + rowH[staffYs.length - 1];
     if (SL.length > 1) parts.push(line(sy.x0, topY, sy.x0, botY, THIN, 'barline'));
     // 小節線（パートごとにつなぐ）
     const partRows = {};
     SL.forEach((row, r) => (partRows[row.p] = partRows[row.p] || []).push(r));
-    const dots = (x, rs) => { for (const r of rs) { parts.push(glyphC('repeatDot', x, staffYs[r] + 1.5), glyphC('repeatDot', x, staffYs[r] + 2.5)); } };
+    const dots = (x, rs) => { for (const r of rs) { const c = staffYs[r] + rowH[r] / 2, dd = rowKind[r] === 'tab' ? TAB_SP / 2 : 0.5; parts.push(glyphC('repeatDot', x, c - dd), glyphC('repeatDot', x, c + dd)); } };
     sy.ms.forEach((m, idx) => {
       const geo = MS[m].geo;
       if (geo.grp && m !== geo.grp.last) return;
@@ -1306,7 +1372,7 @@ export function layoutScore(score0, opts = {}) {
       const nextStart = nextM != null && score.measures[nextM].repeatStart && !(MS[nextM].geo.grp && nextM !== MS[nextM].geo.grp.first);
       for (const p in partRows) {
         const rs = partRows[p];
-        const y1 = staffYs[rs[0]], y2 = staffYs[rs[rs.length - 1]] + 4;
+        const y1 = staffYs[rs[0]], y2 = staffYs[rs[rs.length - 1]] + rowH[rs[rs.length - 1]];
         const x = geo.x1;
         if (ms.repeatEnd) {
           parts.push(line(x - THICK / 2, y1, x - THICK / 2, y2, THICK, 'barline'));
@@ -1332,7 +1398,7 @@ export function layoutScore(score0, opts = {}) {
       const shared = prevM != null && score.measures[prevM].repeatEnd;
       for (const p in partRows) {
         const rs = partRows[p];
-        const y1 = staffYs[rs[0]], y2 = staffYs[rs[rs.length - 1]] + 4;
+        const y1 = staffYs[rs[0]], y2 = staffYs[rs[rs.length - 1]] + rowH[rs[rs.length - 1]];
         let x = geo.x0 + geo.chg;
         if (!shared) { parts.push(line(x + THICK / 2, y1, x + THICK / 2, y2, THICK, 'barline')); x += THICK; }
         parts.push(line(x + 0.4 + THIN / 2, y1, x + 0.4 + THIN / 2, y2, THIN, 'barline'));
@@ -1344,7 +1410,7 @@ export function layoutScore(score0, opts = {}) {
     for (const p in partRows) {
       const rs = partRows[p];
       if (rs.length > 1) {
-        const y1 = staffYs[rs[0]], y2 = staffYs[rs[rs.length - 1]] + 4;
+        const y1 = staffYs[rs[0]], y2 = staffYs[rs[rs.length - 1]] + rowH[rs[rs.length - 1]];
         const sc = (y2 - y1) / 4;
         const w = gw('brace') * sc;
         parts.push(`<text class="g" transform="translate(${f(sy.x0 - 0.35 - w)} ${f(y2)}) scale(${f(sc)})" x="0" y="0">${G.brace.c}</text>`);
@@ -1365,7 +1431,7 @@ export function layoutScore(score0, opts = {}) {
       const part = score.parts[p];
       const name = k === 0 ? part.name : (multiPart ? part.abbr : '');
       if (!name) continue;
-      const cyy = (staffYs[rs[0]] + staffYs[rs[rs.length - 1]] + 4) / 2 + nameSize * 0.35;
+      const cyy = (staffYs[rs[0]] + staffYs[rs[rs.length - 1]] + rowH[rs[rs.length - 1]]) / 2 + nameSize * 0.35;
       parts.push(`<text class="t iname" x="${f(bx - 0.3)}" y="${f(cyy)}" font-size="${nameSize}" text-anchor="end">${esc(name)}</text>`);
     }
   }
@@ -1381,7 +1447,7 @@ export function layoutScore(score0, opts = {}) {
   }
   for (const mk of marks) { const si = sysInfo[mk.k]; mk.page = si.page; mk.oy = si.staffYs[mk.r]; }
   return {
-    pages: pageSvgs, systems: sysInfo, measures, rows: SL.map(r => ({ p: r.p, s: r.s })), clefs, evGeom, marks, attrs: A, pageW, pageH,
+    pages: pageSvgs, systems: sysInfo, measures, rows: SL.map((row, r) => ({ p: row.p, s: row.s, kind: rowKind[r], h: rowH[r], src: tabSrc[r], tuning: row.staff.tuning || null })), clefs, evGeom, marks, attrs: A, pageW, pageH,
     fifthsAt: fifthsR, rowTrans, partView: !!showParts, transposed: !!opts.transposed,
   };
 }

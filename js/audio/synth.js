@@ -32,29 +32,36 @@ const TIMBRE = {
 };
 
 export class Synth {
-  constructor() {
+  // opts.ctx = 書き出し用の OfflineAudioContext、opts.samplesFrom = 読み込み済みのサンプルを借りる Synth
+  constructor(opts = {}) {
     this.ctx = null;
     this.waves = {};
-    this.samples = {};      // sfName → { midi: AudioBuffer }
+    this.samples = opts.samplesFrom ? opts.samplesFrom.samples : {};      // sfName → { midi: AudioBuffer }
     this.loading = {};
     this.useSamples = true;
     this.voices = new Set();
+    this.channels = new Map(); // パートごとの音量・左右（ミキサー）
+    this.offline = !!opts.ctx;
+    if (opts.ctx) this.setup(opts.ctx);
+  }
+  setup(ctx) {
+    this.ctx = ctx;
+    this.master = ctx.createGain();
+    this.master.gain.value = 0.7;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.ratio.value = 4;
+    this.master.connect(comp).connect(ctx.destination);
   }
 
   // iPad では「ユーザーのタップの中で」AudioContext を作る/再開する必要がある
   ensure() {
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AC({ latencyHint: 'interactive' });
-      this.master = this.ctx.createGain();
-      this.master.gain.value = 0.7;
-      const comp = this.ctx.createDynamicsCompressor();
-      comp.threshold.value = -14; comp.ratio.value = 4;
-      this.master.connect(comp).connect(this.ctx.destination);
+      this.setup(new AC({ latencyHint: 'interactive' }));
       // iOS のマナーモードでも音が出るように（Safari 17 以降）
       try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* 未対応 */ }
     }
-    if (this.ctx.state !== 'running') this.ctx.resume();
+    if (!this.offline && this.ctx.state === 'suspended') this.ctx.resume();
     return this.ctx;
   }
   get now() { return this.ctx ? this.ctx.currentTime : 0; }
@@ -105,12 +112,87 @@ export class Synth {
   }
 
   // 1音を鳴らす。when: AudioContext の時刻（秒）、dur: 長さ（秒）
-  play({ midi, program = 0, sf = null, when = null, dur = 0.5, vel = 0.8 }) {
+  // drum = ドラムの種類（perc.js の id）、ch = パート番号（ミキサーの音量・左右を通す）
+  play({ midi, program = 0, sf = null, when = null, dur = 0.5, vel = 0.8, drum = null, ch = null }) {
     const ctx = this.ensure();
     const t0 = Math.max(when ?? ctx.currentTime, ctx.currentTime);
+    this.out = ch != null && this.channels.has(ch) ? this.channels.get(ch).g : this.master;
+    if (drum) return this.playDrum(drum, t0, vel);
     const smp = sf && this.samples[sf];
     if (smp && smp[midi]) return this.playSample(smp[midi], t0, dur, vel, program);
     return this.playSynth(midi, program, t0, dur, vel);
+  }
+
+  // ミキサー：パート ch の音量（0〜1）と左右（-1〜1）
+  setChannel(ch, vol = 0.8, pan = 0) {
+    const ctx = this.ensure();
+    let c = this.channels.get(ch);
+    if (!c) {
+      c = { g: ctx.createGain(), p: ctx.createStereoPanner ? ctx.createStereoPanner() : null };
+      if (c.p) c.g.connect(c.p).connect(this.master); else c.g.connect(this.master);
+      this.channels.set(ch, c);
+    }
+    c.g.gain.value = Math.max(0, Math.min(1.25, vol / 0.8));
+    if (c.p) c.p.pan.value = Math.max(-1, Math.min(1, pan));
+  }
+
+  // メトロノームのクリック（小節の頭は高い音）
+  click(when, accent = false) {
+    const ctx = this.ensure();
+    const t0 = Math.max(when, ctx.currentTime);
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.value = accent ? 1760 : 1175;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(accent ? 0.22 : 0.14, t0 + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.05);
+    osc.connect(g).connect(this.master);
+    osc.start(t0); osc.stop(t0 + 0.07);
+    this.track(osc, g);
+  }
+
+  // ドラム：太鼓は「音程が下がるサイン波＋ノイズ」、シンバルは「高い音だけ残したノイズ」で作る（オフラインでも鳴る）
+  noise() {
+    if (!this.noiseBuf || this.noiseBuf.sampleRate !== this.ctx.sampleRate) {
+      const n = this.ctx.sampleRate * 2, b = this.ctx.createBuffer(1, n, this.ctx.sampleRate), d = b.getChannelData(0);
+      let x = 1;
+      for (let i = 0; i < n; i++) { x = (x * 16807) % 2147483647; d[i] = (x / 2147483647) * 2 - 1; }
+      this.noiseBuf = b;
+    }
+    return this.noiseBuf;
+  }
+  playDrum(id, t0, vel) {
+    const ctx = this.ctx;
+    const out = this.out || this.master;
+    const v = Math.max(0.05, Math.min(1, vel));
+    const tone = (f0, f1, dec, amp) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.setValueAtTime(f0, t0); o.frequency.exponentialRampToValueAtTime(f1, t0 + dec * 0.6);
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(amp * v, t0 + 0.003); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dec);
+      o.connect(g).connect(out); o.start(t0); o.stop(t0 + dec + 0.05); this.track(o, g);
+    };
+    const hiss = (type, freq, q, dec, amp) => {
+      const src = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain();
+      src.buffer = this.noise();
+      f.type = type; f.frequency.value = freq; f.Q.value = q;
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(amp * v, t0 + 0.002); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dec);
+      src.connect(f).connect(g).connect(out); src.start(t0, Math.random()); src.stop(t0 + dec + 0.05); this.track(src, g);
+    };
+    switch (id) {
+      case 'kick': tone(150, 45, 0.45, 0.9); hiss('lowpass', 900, 0.7, 0.03, 0.25); break;
+      case 'snare': tone(220, 160, 0.12, 0.35); hiss('bandpass', 2400, 0.6, 0.22, 0.55); break;
+      case 'stick': tone(800, 500, 0.04, 0.4); hiss('bandpass', 3000, 2, 0.04, 0.3); break;
+      case 'tom1': tone(260, 170, 0.35, 0.6); break;
+      case 'tom2': tone(190, 120, 0.4, 0.6); break;
+      case 'floor': tone(130, 80, 0.5, 0.65); break;
+      case 'hh': hiss('highpass', 8000, 0.8, 0.06, 0.35); break;
+      case 'hhp': hiss('highpass', 7000, 0.8, 0.05, 0.25); break;
+      case 'hho': hiss('highpass', 7500, 0.8, 0.4, 0.3); break;
+      case 'ride': hiss('highpass', 6000, 0.6, 0.9, 0.16); tone(5200, 5000, 0.5, 0.03); break;
+      case 'bell': tone(2600, 2550, 0.7, 0.12); hiss('highpass', 7000, 0.6, 0.4, 0.08); break;
+      case 'crash': hiss('highpass', 4500, 0.5, 1.6, 0.4); break;
+      default: hiss('bandpass', 2000, 1, 0.1, 0.3);
+    }
   }
 
   playSample(buf, t0, dur, vel, program) {
@@ -126,7 +208,7 @@ export class Synth {
     g.gain.linearRampToValueAtTime(vel * 0.9, t0 + 0.005);
     g.gain.setValueAtTime(vel * 0.9, end);
     g.gain.exponentialRampToValueAtTime(0.0008, end + rel);
-    src.connect(g).connect(this.master);
+    src.connect(g).connect(this.out || this.master);
     src.start(t0);
     src.stop(end + rel + 0.05);
     this.track(src, g);
@@ -161,7 +243,7 @@ export class Synth {
       g.gain.setValueAtTime(peak * T.s, end);
       g.gain.setTargetAtTime(0.0001, end, T.r / 3);
     }
-    osc.connect(lp).connect(g).connect(this.master);
+    osc.connect(lp).connect(g).connect(this.out || this.master);
     osc.start(t0);
     osc.stop(end + T.r * 2 + 0.1);
     this.track(osc, g);

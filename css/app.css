@@ -297,3 +297,25 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
   svg.page .sel, svg.page .sel *, svg.page .playing, svg.page .playing * { fill: #000 !important; stroke: #000 !important; }
   body.color-voices svg.page .v1, body.color-voices svg.page .v2, body.color-voices svg.page .v3 { fill: #000; stroke: #000; }
 }
+
+/* ── Phase 3 ── */
+.oor { fill: #e0245e; }
+svg.page .tabn .tabbg { fill: var(--paper, #fff); stroke: none; }
+svg.page .tabn text { stroke: none; font-family: Arial, Helvetica, sans-serif; font-weight: 600; }
+#btnRec svg .fill { fill: #d33; stroke: none; }
+body.recording #btnRec { background: #d33; }
+body.recording #btnRec svg .fill { fill: #fff; }
+body.recording #btnRec svg circle { animation: recblink 1s steps(2) infinite; }
+@keyframes recblink { 50% { opacity: .35; } }
+.mixer { display: flex; flex-direction: column; gap: 8px; }
+.mx-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.mx-row .mx-n { flex: 1 1 140px; font-weight: 600; }
+.mx-row label { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
+.mx-row input[type=range] { width: 110px; }
+@media print { .oor { fill: #000; } }
+/* iPad 縦（1024px）でも上のバーが1行に収まるように、小節・スコア・ツールは絵だけにする */
+@media (max-width: 1100px) { #btnMeasure span, #btnScore span, #btnTools span { display: none; } }
+svg.page .tabn .tabbg { fill: var(--paper, #fff) !important; stroke: none !important; }
+svg.page .tabn text { stroke: none !important; }
+/* 選択・ホバー中の記号（フォントの文字）に線を付けると太ってにじむので、色だけ変える */
+svg.page .sel text, svg.page .hov text, svg.page .playing text { stroke: none !important; }
