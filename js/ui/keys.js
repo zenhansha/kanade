@@ -7,6 +7,13 @@ export function bindKeys(app) {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     if (document.querySelector('#modalRoot .backdrop')) { if (e.key === 'Escape') app.dialogs.close(); return; }
+    // ホーム画面を開いているあいだは、楽譜の操作はしない（Esc で楽譜に戻る・Alt+N / Ctrl+O だけ）
+    if (app.home?.visible) {
+      if (e.key === 'Escape') { e.preventDefault(); return app.home.hide(); }
+      if ((e.altKey && e.code === 'KeyN') || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n')) { e.preventDefault(); return app.dialogs.newScore(); }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'o') { e.preventDefault(); return app.openFileDialog(); }
+      return;
+    }
     if (app.dialogs.menuEl && e.key === 'Escape') { e.preventDefault(); return app.dialogs.closeMenu(); }
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key;
@@ -23,7 +30,11 @@ export function bindKeys(app) {
       if (lk === 'a') { handled(); return app.selectAll(); }
       // PC は .kanade ファイルへ保存（iPad は端末内）。Shift 付きは「名前を付けて保存」
       if (lk === 's') { handled(); return app.saveToFile(e.shiftKey); }
-      if (lk === 'o') { handled(); return app.dialogs.openList(); }
+      if (lk === 'o') { handled(); return app.home.show('open'); }
+      // Phase 4：検索（Word の Alt+Q / MuseScore の Ctrl+F に近い）と、小節へ移動
+      if (lk === 'k') { handled(); return app.ribbon.openSearch(); }
+      if (lk === 'g' || lk === 'f') { handled(); return app.gotoMeasure(); }
+      if (k === 'F1') { handled(); return app.ribbon.setCollapsed(!document.body.classList.contains('rb-collapsed')); }
       // ブラウザのタブでは Ctrl+N は「新しいウィンドウ」に取られるので Alt+N も用意（下）
       if (lk === 'n') { handled(); return app.dialogs.newScore(); }
       if (lk === 'p') { handled(); return app.print(); }
@@ -40,6 +51,10 @@ export function bindKeys(app) {
     }
     if (e.altKey && code === 'KeyN') { handled(); return app.dialogs.newScore(); }
     if (k === 'F1') { handled(); return app.dialogs.help(); }
+    if (k === 'F9') { handled(); return app.ribbon.togglePanel(); }
+    // MuseScore と同じ：{ } で小節の幅、Shift+X で符尾の向き
+    if (k === '{' || k === '}') { handled(); return app.stretchMeasures(k === '}' ? 1.12 : 1 / 1.12); }
+    if (e.shiftKey && !e.altKey && code === 'KeyX') { handled(); return app.flipStem(); }
     if (e.altKey && /^Digit[1-4]$/.test(code)) { handled(); return app.setVoice(+code.slice(5) - 1); }
     if (e.altKey && (k === 'ArrowUp' || k === 'ArrowDown')) { handled(); return app.shiftPitch('step', k === 'ArrowUp' ? 1 : -1); }
 
@@ -78,7 +93,8 @@ export function bindKeys(app) {
       case 'Escape': handled(); return app.escape();
       case '.': handled(); return app.toggleDot();
       case '0': handled(); return app.state.mode === 'input' ? app.enterRest() : app.deleteSel();
-      case 'r': case 'R': handled(); return app.enterRest();
+      // R：入力モードでは休符、選択モードでは「くり返し」（MuseScore と同じ）
+      case 'r': case 'R': handled(); return app.state.mode === 'select' && app.state.sel ? app.repeatSelection() : app.enterRest();
       case 't': case 'T': handled(); return app.tie();
       case '+': handled(); return app.setAccidentalRelative(1);
       case '-': handled(); return app.setAccidentalRelative(-1);

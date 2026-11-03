@@ -22,7 +22,7 @@ function tx(mode, fn) {
 export const storage = {
   async list() {
     const all = await tx('readonly', st => st.getAll());
-    return (all || []).map(d => ({ id: d.id, title: d.title, updated: d.updated })).sort((a, b) => b.updated - a.updated);
+    return (all || []).map(d => ({ id: d.id, title: d.title, updated: d.updated, pinned: !!d.pinned, fileName: d.fileName || null, summary: d.summary || (d.score ? `${d.score.parts.length}パート・${d.score.measures.length}小節` : '') })).sort((a, b) => b.updated - a.updated);
   },
   get: (id) => tx('readonly', st => st.get(id)),
   put: (doc) => tx('readwrite', st => st.put(doc)),
@@ -49,6 +49,8 @@ const PICK_TYPES = {
   musicxml: { description: 'MusicXML', accept: { 'application/vnd.recordare.musicxml+xml': ['.musicxml'] } },
   midi: { description: 'MIDI ファイル', accept: { 'audio/midi': ['.mid', '.midi'] } },
   wav: { description: 'WAV オーディオ', accept: { 'audio/wav': ['.wav'] } },
+  png: { description: 'PNG 画像', accept: { 'image/png': ['.png'] } },
+  svg: { description: 'SVG 画像', accept: { 'image/svg+xml': ['.svg'] } },
   open: { description: '楽譜（KANADE / MusicXML / MIDI）', accept: { 'application/x-kanade+json': ['.kanade'], 'application/vnd.recordare.musicxml+xml': ['.musicxml', '.xml'], 'application/vnd.recordare.musicxml': ['.mxl'], 'audio/midi': ['.mid', '.midi'] } },
 };
 

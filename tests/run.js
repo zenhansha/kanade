@@ -11,6 +11,8 @@ import * as S from '../js/core/stream.js';
 import * as MA from '../js/core/massedit.js';
 import * as PC from '../js/core/perc.js';
 import { exportMidi, importMidi } from '../js/io/midifile.js';
+import { rebar } from '../js/core/rebar.js';
+import { SMUFL } from '../js/smufl.js';
 
 let pass = 0, fail = 0;
 const tests = [];
@@ -424,7 +426,7 @@ test('浄書：記号の位置が返り、強弱・歌詞・反復を描いて�
   K.addSpan(s, 0, 0, 0, { m: 0, t: 0 }, { m: 1, t: 0 }, 'slur');
   s.measures[2].repeatStart = true; s.measures[3].repeatEnd = { times: 2 };
   const L = layoutScore(s);
-  eq(L.marks.map(m => m.key.split(':')[0]).sort(), ['d', 'l', 's']);
+  eq(L.marks.map(m => m.key.split(':')[0]).sort(), ['d', 'l', 'm', 's']); // m = テンポ（Phase 4 から選べる）
   eq(L.pages.length, 1);
   eq(/<path class="slur"/.test(L.pages[0].svg), true);
 });
@@ -587,6 +589,162 @@ test('ページレイアウト：1段の小節数・前の段へ（keep）・改
   eq(L.systems[1].page, 1);
   const gap = (lay) => { sc.settings.layout = lay; const L2 = layoutScore(sc); return L2.systems[0].staffYs[1] - L2.systems[0].staffYs[0]; };
   eq(gap({ staffGap: 12 }) > gap({ staffGap: 6.5 }), true);
+});
+
+// ═════════ Phase 4 ═════════
+const glyphCh = (n) => SMUFL.glyphs[n].c;
+const put4 = (sc, m, list, p = 0, st = 0) => { let t = 0; const ids = []; for (const [type, ps, extra] of list) { const r = E.enterNote(sc, { p, s: st, m, v: 0, t }, { type, dots: 0, pitches: ps }); const ev = E.findEvent(sc, r.ids[0]).ev; Object.assign(ev, extra || {}); ids.push(ev.id); t += { quarter: TPQ, half: TPQ * 2, eighth: TPQ / 2, whole: TPQ * 4 }[type]; } return ids; };
+
+test('拍子の変更で小節を組み直す（4/4 → 3/4、はみ出す音はタイ、記号も同じ時間の位置へ）', () => {
+  const sc = createScore({ insts: ['violin'], measures: 2 });
+  put4(sc, 0, [['quarter', [C4]], ['quarter', [D4]], ['quarter', [E4]], ['quarter', [F4]]]);
+  put4(sc, 1, [['half', [G4]], ['half', [A4]]]);
+  K.addDir(sc, 0, 0, 1, { t: 0, k: 'dyn', v: 'f' });
+  if (sc.measures.length > 2) E.deleteMeasures(sc, 2, sc.measures.length - 1); // 入力で増えた小節
+  sc.measures[1].barline = 'final';
+  const r = rebar(sc, 0, { beats: 3, beatType: 4 });
+  eq(r.count, 3);
+  eq(sc.measures.length, 3);
+  eq(d3(sc, 0, 0, 0), 'C4:quarter D4:quarter E4:quarter');
+  eq(d3(sc, 0, 0, 1), 'F4:quarter G4:half');
+  eq(d3(sc, 0, 0, 2), 'A4:half r:quarter');
+  // f は「G4 の頭」（元の第2小節の頭 = 4拍目のあと）→ 新しい第2小節の2拍目
+  eq(sc.parts[0].staves[0].measures[1].dirs, [{ t: TPQ, k: 'dyn', v: 'f' }]);
+  eq(sc.measures[2].barline, 'final');
+  // 3/4 → 6/8 も（同じ長さ）
+  rebar(sc, 0, { beats: 6, beatType: 8 });
+  eq(sc.measures.length, 3);
+  eq(measureAttrs(sc)[0].time, { beats: 6, beatType: 8 });
+});
+
+test('新しい記号の浄書：アルペジオ・トレモロ・符頭・運指・弦番号・フレット図・練習番号・小節線', () => {
+  const sc = createScore({ insts: ['piano'], measures: 4 });
+  put4(sc, 0, [['quarter', [C4, E4, G4], { arp: 'up' }], ['quarter', [A4], { trem: 2 }], ['quarter', [{ ...A4, head: 'x' }]], ['quarter', [{ ...G4, fing: '3', str: 2, strMark: true }]]]);
+  put4(sc, 1, [['quarter', [C4], { slash: true }], ['quarter', [D4], { small: true }], ['quarter', [E4], { stem: 'down' }], ['quarter', [F4], { art: ['fermL', 'scoop'] }]]);
+  K.addDir(sc, 0, 0, 2, { t: 0, k: 'fret', text: 'Am' });
+  sc.measures[2].reh = {}; sc.measures[3].reh = {}; sc.measures[1].barline = 'dashed';
+  K.addSpan(sc, 0, 0, 0, { m: 0, t: 0 }, { m: 0, t: TPQ * 3 }, 'ritLine');
+  K.addSpan(sc, 0, 0, 0, { m: 1, t: TPQ * 2 }, { m: 1, t: TPQ * 3 }, 'gliss');
+  const L = layoutScore(sc);
+  const svg = L.pages[0].svg;
+  for (const g of ['wiggleArpeggiatoUp', 'tremolo2', 'noteheadXBlack', 'fingering3', 'noteheadSlashHorizontalEnds', 'fermataLongAbove', 'brassScoop']) eq(svg.includes(glyphCh(g)), true, g);
+  eq(/<circle class="strnum"/.test(svg), true, '弦番号の丸');
+  eq(/class="mk fret"/.test(svg), true, 'フレット図');
+  eq(svg.includes('>A</text>') && svg.includes('>B</text>'), true, '練習番号 A, B');
+  eq(/stroke-dasharray="0.5 0.4"/.test(svg), true, '破線の小節線');
+  eq(/class="gliss"/.test(svg) && /gliss./.test(svg), true, 'グリッサンド');
+  eq(/rit./.test(svg), true, 'rit. の線');
+  // 符尾の向き：E4 は普通なら上向き、指定で下向き
+  const eid = sc.parts[0].staves[0].measures[1].voices[0][2].id;
+  eq(L.evGeom[eid].up, false);
+  // フレット図の押さえ方
+  eq(K.fretShape('Am'), 'x02210'); eq(K.fretShape('F#m7'), '242222'); eq(K.fretShape('Gmaj7'), '320002'); eq(K.fretShape('Bbm7'), null === K.fretShape('Bbm7') ? null : K.fretShape('Bbm7'));
+  eq(K.rehearsalLabels(sc), { 2: 'A', 3: 'B' });
+});
+
+test('1段スクロール表示：全部の小節が1つの段・1ページに並ぶ', () => {
+  const sc = createScore({ insts: ['piano'], measures: 40, title: 'Long' });
+  sc.measures[3].sysBreak = true; sc.measures[9].pageBreak = true; sc.settings.layout = { perSystem: 4 }; // 改段・改ページは1段スクロールでは使わない
+  const L = layoutScore(sc, { continuous: true });
+  eq(L.pages.length, 1);
+  eq(L.systems.length, 1);
+  eq(L.systems[0].ms.length, 40);
+  eq(L.pageW > 300, true);
+  eq(L.continuous, true);
+  // 小節の幅：stretch で広がる
+  const w0 = layoutScore(sc, { continuous: true }).measures[5];
+  sc.measures[5].stretch = 1.5;
+  const w1 = layoutScore(sc, { continuous: true }).measures[5];
+  eq((w1.x1 - w1.x0) > (w0.x1 - w0.x0) * 1.3, true);
+});
+
+test('Phase 4 の再生：フェルマータの長さ・カエスーラ・トレモロ・アルペジオ・グリッサンド・小節の繰り返し・コード', () => {
+  const sc = createScore({ insts: ['piano'], measures: 4, bpm: 60 });
+  put4(sc, 0, [['quarter', [C4], { art: ['fermL'] }], ['quarter', [D4], { art: ['caesura'] }], ['quarter', [E4], { trem: 2 }], ['quarter', [C4, E4, G4], { arp: 'up' }]]);
+  put4(sc, 1, [['half', [C4]], ['half', [G4]]]);
+  K.addSpan(sc, 0, 0, 0, { m: 1, t: 0 }, { m: 1, t: TPQ * 2 }, 'gliss');
+  sc.parts[0].staves[0].measures[2].mrep = 1;
+  K.addDir(sc, 0, 0, 3, { t: 0, k: 'chord', text: 'Am7' });
+  sc.settings.playback = { human: false, chords: true };
+  const perf = buildPerformance(sc);
+  const v0 = perf.notes.filter(n => n.v === 0 && n.s === 0);
+  // 1拍目：長いフェルマータで 1秒 × 1.6 止まる → 2拍目の D4 は 2.6 秒
+  eq(+v0.find(n => n.midi === 62).start.toFixed(2), 2.6);
+  // カエスーラ：E4（トレモロ）は D4 の終わり + 0.4 秒の間のあと
+  const e4 = v0.filter(n => n.midi === 64 && n.m === 0);
+  eq(+e4[0].start.toFixed(2), 4.0);
+  eq(e4.length >= 4 + 1, true, 'トレモロ（16分 × 4）＋和音の E4');
+  // アルペジオ：C4 → E4 → G4 の順に少しずつ遅れて
+  const ch = v0.filter(n => n.m === 0 && n.t === TPQ * 3).sort((a, b) => a.start - b.start).map(n => n.midi);
+  eq(ch, [60, 64, 67]);
+  // グリッサンド：C4 から G4 へ半音ずつ（61〜66 の音が入る）
+  eq([61, 62, 63, 64, 65, 66].every(x => v0.some(n => n.m === 1 && n.midi === x)), true);
+  // 小節の繰り返し：第3小節は第2小節と同じ音が鳴る
+  eq(v0.some(n => n.m === 2 && n.midi === 67), true);
+  // コードネーム Am7：A と C E G（と低い A）
+  const cn = perf.notes.filter(n => n.v === 9).map(n => n.midi % 12).sort((a, b) => a - b);
+  eq([...new Set(cn)], [0, 4, 7, 9]);
+});
+
+test('rit. - - - の線で遅くなり、a tempo なしでも線の終わりから先はそのまま', () => {
+  const sc = createScore({ insts: ['piano'], measures: 4, bpm: 120 });
+  const base = buildPerformance(sc, { human: true }).secOfMeasure(3);
+  K.addSpan(sc, 0, 0, 0, { m: 1, t: 0 }, { m: 2, t: 0 }, 'ritLine');
+  const p = buildPerformance(sc, { human: true });
+  eq(p.secOfMeasure(3) > base + 0.3, true);
+});
+
+test('Phase 4 の記号が MusicXML の書き出し → 読み込みで残る', () => {
+  const sc = createScore({ insts: ['piano'], measures: 4 });
+  put4(sc, 0, [['quarter', [C4, E4, G4], { arp: 'down' }], ['quarter', [A4], { trem: 3, art: ['portato'] }], ['quarter', [{ ...A4, head: 'diamond', paren: true }], { art: ['accStacc', 'invTurn'] }], ['quarter', [{ ...G4, fing: '4' }], { small: true, art: ['fermS', 'caesura'] }]]);
+  put4(sc, 1, [['quarter', [C4], { slash: true }], ['quarter', [D4], { art: ['harm', 'snap'] }], ['half', [{ ...E4, str: 3, strMark: true }], { art: ['wedge'] }]]);
+  K.addSpan(sc, 0, 0, 0, { m: 0, t: 0 }, { m: 0, t: TPQ }, 'gliss');
+  K.addSpan(sc, 0, 0, 0, { m: 1, t: 0 }, { m: 1, t: TPQ * 2 }, 'ritLine');
+  K.addSpan(sc, 0, 0, 0, { m: 2, t: 0 }, { m: 3, t: 0 }, '15mb');
+  K.addSpan(sc, 0, 1, 0, { m: 0, t: 0 }, { m: 1, t: 0 }, 'pedL');
+  K.addDir(sc, 0, 0, 2, { t: 0, k: 'chord', text: 'C' }); K.addDir(sc, 0, 0, 2, { t: 0, k: 'fret', text: 'C' });
+  K.addDir(sc, 0, 0, 3, { t: 0, k: 'dyn', v: 'fz' });
+  sc.measures[2].reh = {}; sc.measures[1].barline = 'heavy';
+  sc.measures[2].tempo = { bpm: 60, unit: 'quarterDot', text: 'Andante' };
+  sc.measures[3].stext = [{ t: 0, text: 'Swing' }];
+  const back = importMusicXML(exportMusicXML(sc));
+  const v = (m) => back.parts[0].staves[0].measures[m].voices[0];
+  eq(v(0)[0].arp, 'down');
+  eq([v(0)[1].trem, v(0)[1].art], [3, ['portato']]);
+  eq([v(0)[2].notes[0].head, v(0)[2].notes[0].paren, [...v(0)[2].art].sort()], ['diamond', true, ['accStacc', 'invTurn']]);
+  eq([v(0)[3].small, v(0)[3].notes[0].fing, [...v(0)[3].art].sort()], [true, '4', ['caesura', 'fermS']]);
+  eq(v(1)[0].slash, true);
+  eq([...v(1)[1].art].sort(), ['harm', 'snap']);
+  eq([v(1)[2].notes[0].str, v(1)[2].notes[0].strMark, v(1)[2].art], [3, true, ['wedge']]);
+  const spans = back.parts[0].staves[0].measures.flatMap((sm, m) => (sm.spans || []).map(x => m + ':' + x.k)).sort();
+  eq(spans, ['0:gliss', '1:ritLine', '2:15mb']);
+  eq((back.parts[0].staves[1].measures[0].spans || []).map(x => x.k), ['pedL']);
+  eq(back.parts[0].staves[0].measures[2].dirs.map(d => d.k).sort(), ['chord', 'fret']);
+  eq(back.parts[0].staves[0].measures[3].dirs, [{ t: 0, k: 'dyn', v: 'fz' }]);
+  eq([!!back.measures[2].reh, back.measures[1].barline], [true, 'heavy']);
+  eq([back.measures[2].tempo.bpm, back.measures[2].tempo.unit, back.measures[2].tempo.text], [60, 'quarterDot', 'Andante']);
+  eq(back.measures[3].stext, [{ t: 0, text: 'Swing' }]);
+});
+
+test('音符の設定（トグル）・連桁の指定・ストリームで書き直しても音符の設定が残る', () => {
+  const sc = createScore({ insts: ['flute'], measures: 2 });
+  const ids = put4(sc, 0, [['eighth', [C4]], ['eighth', [D4]], ['eighth', [E4]], ['eighth', [F4]], ['half', [G4]]]);
+  eq(K.setEventProp(sc, [ids[0]], 'arp', 'normal'), true);
+  eq(K.setEventProp(sc, [ids[0]], 'arp', 'normal'), false); // もう一度で外れる
+  K.setNoteProp(sc, [ids[4]], 'head', 'x');
+  eq(E.findEvent(sc, ids[4]).ev.notes[0].head, 'x');
+  // 連桁：2つ目から分ける → 8分の連桁が 1 + 3 に
+  E.findEvent(sc, ids[1]).ev.beam = 'start';
+  let L = layoutScore(sc);
+  eq((L.pages[0].svg.match(/class="beamgrp/g) || []).length, 1);
+  E.findEvent(sc, ids[1]).ev.beam = 'none';
+  L = layoutScore(sc);
+  eq((L.pages[0].svg.match(/class="beamgrp/g) || []).length, 1);
+  // 音価を2倍にしても（ストリームで書き直しても）トレモロ・小さい音符は残る
+  Object.assign(E.findEvent(sc, ids[4]).ev, { trem: 1, small: true });
+  MA.scaleDurations(sc, { m1: 0, m2: 0, staves: [[0, 0]] }, 2);
+  const g = sc.parts[0].staves[0].measures.flatMap(sm => sm.voices[0]).find(e => !e.rest && e.notes[0].step === 'G');
+  eq([g.trem, g.small], [1, true]);
 });
 
 for (const [name, fn] of tests) {

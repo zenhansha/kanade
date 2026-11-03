@@ -177,6 +177,17 @@ export const CLEFS = {
   bass8vb: { sign: 'F', line: 4, oct: -1, mid: 15, glyph: 'fClef8vb', glyphPos: 2, ja: 'ヘ音記号（8vb）' },
   alto: { sign: 'C', line: 3, oct: 0, mid: 28, glyph: 'cClef', glyphPos: 0, ja: 'ハ音記号（アルト）' },
   tenor: { sign: 'C', line: 4, oct: 0, mid: 26, glyph: 'cClef', glyphPos: 2, ja: 'ハ音記号（テノール）' },
+  // Phase 4：そのほかの音部記号
+  treble15ma: { sign: 'G', line: 2, oct: 2, mid: 48, glyph: 'gClef15ma', glyphPos: -2, ja: 'ト音記号（15ma）' },
+  treble15mb: { sign: 'G', line: 2, oct: -2, mid: 20, glyph: 'gClef15mb', glyphPos: -2, ja: 'ト音記号（15mb）' },
+  bass8va: { sign: 'F', line: 4, oct: 1, mid: 29, glyph: 'fClef8va', glyphPos: 2, ja: 'ヘ音記号（8va）' },
+  bass15mb: { sign: 'F', line: 4, oct: -2, mid: 8, glyph: 'fClef15mb', glyphPos: 2, ja: 'ヘ音記号（15mb）' },
+  soprano: { sign: 'C', line: 1, oct: 0, mid: 32, glyph: 'cClef', glyphPos: -4, ja: 'ハ音記号（ソプラノ）' },
+  mezzo: { sign: 'C', line: 2, oct: 0, mid: 30, glyph: 'cClef', glyphPos: -2, ja: 'ハ音記号（メゾソプラノ）' },
+  baritoneC: { sign: 'C', line: 5, oct: 0, mid: 24, glyph: 'cClef', glyphPos: 4, ja: 'ハ音記号（バリトン）' },
+  baritoneF: { sign: 'F', line: 3, oct: 0, mid: 24, glyph: 'fClef', glyphPos: 0, ja: 'ヘ音記号（バリトン）' },
+  subbass: { sign: 'F', line: 5, oct: 0, mid: 20, glyph: 'fClef', glyphPos: 4, ja: 'ヘ音記号（低音）' },
+  frenchViolin: { sign: 'G', line: 1, oct: 0, mid: 36, glyph: 'gClef', glyphPos: -4, ja: 'ト音記号（フランス式）' },
   percussion: { sign: 'percussion', line: 3, oct: 0, mid: 34, glyph: 'unpitchedPercussionClef1', glyphPos: 0, ja: '打楽器記号' },
   tab: { sign: 'TAB', line: 5, oct: 0, mid: 34, glyph: '6stringTabClef', glyphPos: 0, ja: 'TAB' },
 };

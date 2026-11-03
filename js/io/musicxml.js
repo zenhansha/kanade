@@ -7,20 +7,45 @@ import { TPQ, TYPES, dottedTicks, splitSpan, diatonic, midiOf, keyAlter, clefKey
 import { DRUMS, DRUM, drumOf, drumAt, drumForGm, drumPitch, tabFrets, TUNINGS } from '../core/perc.js';
 import { createScore, measureAttrs, evTicks, measureRest, newId, INSTRUMENTS, INST, fillMeasures } from '../core/score.js';
 import { positions, normalizeVoice } from '../core/edit.js';
-import { ARTICS, DYNAMICS, JUMPS, parseChord, spanEnd } from '../core/marks.js';
+import { ARTICS, DYNAMICS, JUMPS, parseChord, spanEnd, fretShape, rehearsalLabels, SPANS } from '../core/marks.js';
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const gcd = (a, b) => { while (b) [a, b] = [b, a % b]; return a; };
 const ACC_NAME = { '-2': 'flat-flat', '-1': 'flat', 0: 'natural', 1: 'sharp', 2: 'double-sharp' };
 
 // アーティキュレーション ⇄ MusicXML（どの要素の中に書くか）
+// 1つの記号 = [入れ物, 要素] の並び（アクセント＋スタッカートのように2つになるものも）
 const ART_XML = {
-  stacc: ['articulations', 'staccato'], staccss: ['articulations', 'staccatissimo'], ten: ['articulations', 'tenuto'],
-  acc: ['articulations', 'accent'], marc: ['articulations', 'strong-accent'], breath: ['articulations', 'breath-mark'],
-  tr: ['ornaments', 'trill-mark'], mord: ['ornaments', 'mordent'], prall: ['ornaments', 'inverted-mordent'], turn: ['ornaments', 'turn'],
-  up: ['technical', 'up-bow'], down: ['technical', 'down-bow'], ferm: [null, 'fermata'],
+  stacc: [['articulations', '<staccato/>']], staccss: [['articulations', '<staccatissimo/>']], wedge: [['articulations', '<spiccato/>']],
+  ten: [['articulations', '<tenuto/>']], portato: [['articulations', '<detached-legato/>']],
+  acc: [['articulations', '<accent/>']], accStacc: [['articulations', '<accent/>'], ['articulations', '<staccato/>']], tenAcc: [['articulations', '<accent/>'], ['articulations', '<tenuto/>']],
+  marc: [['articulations', '<strong-accent type="up"/>']], marcStacc: [['articulations', '<strong-accent type="up"/>'], ['articulations', '<staccato/>']],
+  stress: [['articulations', '<stress/>']], unstress: [['articulations', '<unstress/>']], soft: [['articulations', '<soft-accent/>']],
+  breath: [['articulations', '<breath-mark/>']], breathT: [['articulations', '<breath-mark>tick</breath-mark>']], caesura: [['articulations', '<caesura/>']], caesuraS: [['articulations', '<caesura>short</caesura>']],
+  scoop: [['articulations', '<scoop/>']], plop: [['articulations', '<plop/>']], doit: [['articulations', '<doit/>']], fall: [['articulations', '<falloff/>']],
+  tr: [['ornaments', '<trill-mark/>']], mord: [['ornaments', '<mordent/>']], prall: [['ornaments', '<inverted-mordent/>']], turn: [['ornaments', '<turn/>']],
+  invTurn: [['ornaments', '<inverted-turn/>']], turnSlash: [['ornaments', '<turn slash="yes"/>']], haydn: [['ornaments', '<haydn/>']], trembl: [['ornaments', '<other-ornament smufl="ornamentTremblement"/>']],
+  up: [['technical', '<up-bow/>']], down: [['technical', '<down-bow/>']], harm: [['technical', '<harmonic/>']], open: [['technical', '<open-string/>']],
+  stopped: [['technical', '<stopped/>']], snap: [['technical', '<snap-pizzicato/>']], lhpizz: [['technical', '<stopped smufl="pluckedLeftHandPizzicato"/>']], thumb: [['technical', '<thumb-position/>']],
+  ferm: [[null, '<fermata type="upright"/>']], fermS: [[null, '<fermata type="upright">angled</fermata>']], fermL: [[null, '<fermata type="upright">square</fermata>']],
+  fermVS: [[null, '<fermata type="upright">double-angled</fermata>']], fermVL: [[null, '<fermata type="upright">double-square</fermata>']],
 };
-const XML_ART = Object.fromEntries(Object.entries(ART_XML).map(([k, [, el]]) => [el, k]));
+// 読み込み：要素の名前（と中身）→ 記号
+const XML_ART = {
+  staccato: 'stacc', staccatissimo: 'staccss', spiccato: 'wedge', tenuto: 'ten', 'detached-legato': 'portato', accent: 'acc', 'strong-accent': 'marc',
+  stress: 'stress', unstress: 'unstress', 'soft-accent': 'soft', 'breath-mark': 'breath', caesura: 'caesura', scoop: 'scoop', plop: 'plop', doit: 'doit', falloff: 'fall',
+  'trill-mark': 'tr', mordent: 'mord', 'inverted-mordent': 'prall', turn: 'turn', 'inverted-turn': 'invTurn', haydn: 'haydn',
+  'up-bow': 'up', 'down-bow': 'down', harmonic: 'harm', 'open-string': 'open', open: 'open', stopped: 'stopped', 'snap-pizzicato': 'snap', 'thumb-position': 'thumb',
+};
+const FERM_XML = { angled: 'fermS', square: 'fermL', 'double-angled': 'fermVS', 'double-square': 'fermVL' };
+// 符頭の形：KANADE ⇄ MusicXML
+const HEAD_XML = { x: 'x', circlex: 'circle-x', diamond: 'diamond', slash: 'slash', triangle: 'triangle', square: 'square', plus: 'cross' };
+const XML_HEAD = { ...Object.fromEntries(Object.entries(HEAD_XML).map(([k, v]) => [v, k])), 'inverted triangle': 'triangle', rectangle: 'square', 'cross': 'plus', 'circled': 'circlex' };
+const BAR_XML = { final: 'light-heavy', double: 'light-light', dashed: 'dashed', dotted: 'dotted', heavy: 'heavy', heavyHeavy: 'heavy-heavy', tick: 'tick', short: 'short', none: 'none' };
+const XML_BAR = Object.fromEntries(Object.entries(BAR_XML).map(([k, v]) => [v, k]));
+const UNIT_XML = { quarter: ['quarter', 0], half: ['half', 0], eighth: ['eighth', 0], quarterDot: ['quarter', 1], halfDot: ['half', 1], eighthDot: ['eighth', 1] };
+// 文字＋破線の線（rit. - - - など）：書き出すときの文字
+const LINE_WORDS = { crescLine: 'cresc.', dimLine: 'dim.', ritLine: 'rit.', accelLine: 'accel.', letRing: 'let ring', palmMute: 'P.M.' };
 // コードネームの種類（MusicXML の kind）。読み込みは text 属性を優先し、なければこの表で記号にする
 const KINDS = [
   ['', 'major'], ['m', 'minor'], ['7', 'dominant'], ['maj7', 'major-seventh'], ['M7', 'major-seventh'], ['m7', 'minor-seventh'],
@@ -73,6 +98,7 @@ export function exportMusicXML(score) {
       `<midi-instrument id="${id}-I1"><midi-channel>${(i % 15) + 1 + (i % 15 >= 9 ? 1 : 0)}</midi-channel><midi-program>${p.program + 1}</midi-program></midi-instrument></score-part>`);
   });
   out.push('  </part-list>');
+  const REH = rehearsalLabels(score);
   // カッコの終わり：その小節で終わるカッコ
   const endingStop = {};
   score.measures.forEach((ms, m) => { if (ms.ending) endingStop[m + Math.max(1, ms.ending.len || 1) - 1] = ms.ending; });
@@ -92,26 +118,33 @@ export function exportMusicXML(score) {
       st.measures.forEach((sm, m) => {
         const staffT = nst > 1 ? `<staff>${s + 1}</staff>` : '';
         for (const d of sm.dirs || []) {
-          if (d.k === 'dyn') posDirs[s][m].push({ t: d.t, xml: (off) => `<direction placement="${'below'}"><direction-type><dynamics><${d.v}/></dynamics></direction-type>${off}${staffT}</direction>` });
+          if (d.k === 'dyn') posDirs[s][m].push({ t: d.t, xml: (off) => `<direction placement="${'below'}"><direction-type><dynamics>${['sfzp'].includes(d.v) ? `<other-dynamics>${d.v}</other-dynamics>` : `<${d.v}/>`}</dynamics></direction-type>${off}${staffT}</direction>` });
           else if (d.k === 'text') posDirs[s][m].push({ t: d.t, xml: (off) => `<direction placement="${d.pos === 'below' ? 'below' : 'above'}"><direction-type><words${d.it === false ? '' : ' font-style="italic"'}>${esc(d.text)}</words></direction-type>${off}${staffT}</direction>` });
-          else if (d.k === 'chord') posDirs[s][m].push({ t: d.t, harmony: true, xml: (off) => harmonyXml(d.text, off, staffT) });
+          else if (d.k === 'chord') { const fr = (sm.dirs || []).find(q => q.k === 'fret' && q.t === d.t); posDirs[s][m].push({ t: d.t, harmony: true, xml: (off) => harmonyXml(d.text, off, staffT, fr ? fretShape(fr.text) : null) }); }
+          else if (d.k === 'fret' && !(sm.dirs || []).some(q => q.k === 'chord' && q.t === d.t)) posDirs[s][m].push({ t: d.t, harmony: true, xml: (off) => harmonyXml(d.text, off, staffT, fretShape(d.text)) });
         }
         (sm.spans || []).forEach(sp => {
           const e = spanEnd(m, sp);
           if (e.m >= score.measures.length) return;
           const startEv = positions(sm.voices[sp.v] || sm.voices[0]).find(x => x.start === sp.t);
           const endPos = positions(st.measures[e.m].voices[sp.v] || st.measures[e.m].voices[0]).find(x => x.start === e.t);
-          if (sp.k === 'slur' || sp.k === 'trill') {
+          if (sp.k === 'slur' || sp.k === 'trill' || sp.k === 'vib' || sp.k === 'gliss') {
             if (!startEv || !endPos) return;
             const no = (slurNo++ % 6) + 1;
             if (sp.k === 'slur') { nm(startEv.ev.id).start.push(`<slur type="start" number="${no}"/>`); nm(endPos.ev.id).stop.push(`<slur type="stop" number="${no}"/>`); }
-            else { nm(startEv.ev.id).start.push(`<ornaments><trill-mark/><wavy-line type="start" number="${no}"/></ornaments>`); nm(endPos.ev.id).stop.push(`<ornaments><wavy-line type="stop" number="${no}"/></ornaments>`); }
+            else if (sp.k === 'gliss') { nm(startEv.ev.id).start.push(`<glissando type="start" line-type="solid" number="${no}">gliss.</glissando>`); nm(endPos.ev.id).stop.push(`<glissando type="stop" line-type="solid" number="${no}"/>`); }
+            else { nm(startEv.ev.id).start.push(`<ornaments>${sp.k === 'trill' ? '<trill-mark/>' : ''}<wavy-line type="start" number="${no}"${sp.k === 'vib' ? ' smufl="wiggleVibrato"' : ''}/></ornaments>`); nm(endPos.ev.id).stop.push(`<ornaments><wavy-line type="stop" number="${no}"/></ornaments>`); }
             return;
           }
           const stopT = endPos ? endPos.end : e.t;
+          const words = sp.k === 'textLine' ? sp.text || '' : LINE_WORDS[sp.k];
           const [st0, sp0, pl] = sp.k === 'cresc' ? ['<wedge type="crescendo"/>', '<wedge type="stop"/>', 'below'] : sp.k === 'dim' ? ['<wedge type="diminuendo"/>', '<wedge type="stop"/>', 'below']
             : sp.k === 'ped' ? ['<pedal type="start" line="no" sign="yes"/>', '<pedal type="stop" line="no" sign="yes"/>', 'below']
+            : sp.k === 'pedL' ? ['<pedal type="start" line="yes" sign="no"/>', '<pedal type="stop" line="yes" sign="no"/>', 'below']
             : sp.k === '8vb' ? ['<octave-shift type="up" size="8"/>', '<octave-shift type="stop" size="8"/>', 'below']
+            : sp.k === '15mb' ? ['<octave-shift type="up" size="15"/>', '<octave-shift type="stop" size="15"/>', 'below']
+            : sp.k === 'bracket' ? ['<bracket type="start" line-end="down" line-type="solid"/>', '<bracket type="stop" line-end="down"/>', 'above']
+            : words != null ? [`${words ? `<words${/cresc|dim|rit|accel/.test(sp.k) ? ' font-style="italic"' : ''}>${esc(words)}</words></direction-type><direction-type>` : ''}<dashes type="start"/>`, `<dashes type="stop"/>${SPANS[sp.k]?.hook ? '</direction-type><direction-type><bracket type="stop" line-end="down"/>' : ''}`, SPANS[sp.k]?.dyn ? 'below' : 'above']
             : [`<octave-shift type="down" size="${sp.k === '15ma' ? 15 : 8}"/>`, `<octave-shift type="stop" size="${sp.k === '15ma' ? 15 : 8}"/>`, 'above'];
           posDirs[s][m].push({ t: sp.t, xml: (off) => `<direction placement="${pl}"><direction-type>${st0}</direction-type>${off}${staffT}</direction>` });
           posDirs[s][e.m].push({ t: stopT, xml: (off) => `<direction placement="${pl}"><direction-type>${sp0}</direction-type>${off}${staffT}</direction>` });
@@ -149,14 +182,19 @@ export function exportMusicXML(score) {
       if (m === 0 && inst.oct) at.push(`<transpose><diatonic>${inst.trans.diatonic}</diatonic><chromatic>${inst.trans.chromatic}</chromatic></transpose>`);
       if (at.length) out.push(`      <attributes>${at.join('')}</attributes>`);
       if (ms.tempo && pi === 0) {
-        out.push(`      <direction placement="above"><direction-type>${ms.tempo.text ? `<words font-weight="bold">${esc(ms.tempo.text)}</words></direction-type><direction-type>` : ''}<metronome parentheses="no"><beat-unit>quarter</beat-unit><per-minute>${ms.tempo.bpm}</per-minute></metronome></direction-type><sound tempo="${ms.tempo.bpm}"/></direction>`);
+        const [bu, bd] = UNIT_XML[ms.tempo.unit] || UNIT_XML.quarter;
+        out.push(`      <direction placement="above"><direction-type>${ms.tempo.text ? `<words font-weight="bold">${esc(ms.tempo.text)}</words></direction-type><direction-type>` : ''}<metronome parentheses="no"${ms.tempo.hideBpm ? ' print-object="no"' : ''}><beat-unit>${bu}</beat-unit>${bd ? '<beat-unit-dot/>' : ''}<per-minute>${ms.tempo.bpm}</per-minute></metronome></direction-type><sound tempo="${+(a.bpm).toFixed(2)}"/></direction>`);
       }
+      if (pi === 0 && REH[m] != null) out.push(`      <direction placement="above"><direction-type><rehearsal enclosure="square">${esc(REH[m])}</rehearsal></direction-type></direction>`);
+      if (pi === 0) for (const x of ms.stext || []) out.push(`      <direction placement="above" system="only-top"><direction-type><words font-weight="bold">${esc(x.text)}</words></direction-type>${x.t ? `<offset>${dur(x.t)}</offset>` : ''}</direction>`);
       if (pi === 0 && ms.segno) out.push('      <direction placement="above"><direction-type><segno/></direction-type><sound segno="segno"/></direction>');
       if (pi === 0 && ms.coda) out.push('      <direction placement="above"><direction-type><coda/></direction-type><sound coda="coda"/></direction>');
       let first = true;
       part.staves.forEach((st, s) => {
         const isTab = st.tabOf != null, isPerc = st.clef === 'percussion';
-        const sm = isTab ? part.staves[st.tabOf].measures[m] : st.measures[m];
+        const srcSt = isTab ? part.staves[st.tabOf] : st;
+        let rm = m; while (rm > 0 && srcSt.measures[rm]?.mrep) rm--;
+        const sm = srcSt.measures[rm];
         const tun = isTab ? st.tuning || TUNINGS.guitar.notes : null;
         const accs = isPerc ? new Map() : accidentalMap(sm, a.fifths);
         const dirs = posDirs[s][m].sort((x, y) => x.t - y.t || (x.harmony ? -1 : 1) - (y.harmony ? -1 : 1));
@@ -187,7 +225,10 @@ export function exportMusicXML(score) {
               if (!nextEv || !nextEv.tuplet || nextEv.tuplet.id !== ev.tuplet.id) { tupN += '<tuplet type="stop"/>'; tupOpen = null; }
             }
             const staffT = nst > 1 ? `<staff>${s + 1}</staff>` : '';
-            const typeT = ev.mr ? '' : `<type>${ev.type}</type>${'<dot/>'.repeat(ev.dots || 0)}`;
+            const typeT = ev.mr ? '' : `<type${ev.small ? ' size="cue"' : ''}>${ev.type}</type>${'<dot/>'.repeat(ev.dots || 0)}`;
+            const stemT = isTab || ev.rest ? '' : ev.slash ? '<stem>none</stem>' : ev.stem ? `<stem>${ev.stem}</stem>` : '';
+            const evN = isTab || ev.rest ? '' : (ev.arp === 'bracket' ? '<non-arpeggiate type="bottom"/>' : ev.arp ? `<arpeggiate${ev.arp === 'up' || ev.arp === 'down' ? ` direction="${ev.arp}"` : ''}/>` : '') +
+              (ev.trem ? `<ornaments><tremolo type="${ev.trem === 'z' ? 'unmeasured' : 'single'}">${ev.trem === 'z' ? 0 : ev.trem}</tremolo></ornaments>` : '');
             // アーティキュレーション・スラーなど（和音では最初の音だけに書く）
             const marks = isTab ? null : noteMarks[ev.id];
             const artN = isTab ? '' : artXml(ev.art) + (marks ? marks.stop.join('') + marks.start.join('') : '');
@@ -199,7 +240,7 @@ export function exportMusicXML(score) {
               const prev = !!lyrPrev[key];
               const syl = ly.h ? (prev ? 'middle' : 'begin') : (prev ? 'end' : 'single');
               lyrPrev[key] = !!ly.h;
-              lyrT += `<lyric number="${verse + 1}"><syllabic>${syl}</syllabic><text>${esc(ly.t)}</text></lyric>`;
+              lyrT += `<lyric number="${verse + 1}"><syllabic>${syl}</syllabic><text>${esc(ly.t)}</text>${ly.ext ? '<extend type="start"/>' : ''}</lyric>`;
             });
             // 装飾音符（長さなし、本音符の前）
             for (const gr of isTab ? [] : ev.grace || []) gr.notes.forEach((n, k) => {
@@ -219,12 +260,14 @@ export function exportMusicXML(score) {
               if (n.tie) tieOpen[key] = true;
               const ties = (stop ? '<tie type="stop"/>' : '') + (n.tie ? '<tie type="start"/>' : '');
               const tied = (stop ? '<tied type="stop"/>' : '') + (n.tie ? '<tied type="start"/>' : '');
-              const acc = accs.get(n) ? `<accidental>${ACC_NAME[n.alter || 0]}</accidental>` : '';
+              const acc = accs.get(n) || (n.acc && !isPerc && !ev.slash) ? `<accidental${!accs.get(n) ? ' cautionary="yes"' : ''}>${ACC_NAME[n.alter || 0]}</accidental>` : '';
               const beamT = k === 0 && beams[idx] ? beams[idx].map((b, li) => `<beam number="${li + 1}">${b}</beam>`).join('') : '';
-              const tech = frets && frets[k] ? `<technical><string>${frets[k].str}</string><fret>${frets[k].fret}</fret></technical>` : '';
-              const notations = tied + (k === 0 ? tupN + artN : '') + tech;
+              const fg = !isTab && n.fing != null && n.fing !== '' ? (/^[pimat]$/.test(n.fing) ? `<pluck>${n.fing}</pluck>` : `<fingering>${esc(n.fing)}</fingering>`) : '';
+              const sn = !isTab && n.strMark && n.str ? `<string>${n.str}</string>` : '';
+              const tech = frets && frets[k] ? `<technical><string>${frets[k].str}</string><fret>${frets[k].fret}</fret></technical>` : fg || sn ? `<technical>${fg}${sn}</technical>` : '';
+              const notations = tied + (k === 0 ? tupN + artN : '') + evN + tech;
               out.push(`      <note>${k > 0 ? '<chord/>' : ''}${pitchXml(n, isPerc)}` +
-                `<duration>${d}</duration>${ties}${instXml(n, isPerc, pi)}<voice>${vn}</voice>${typeT}${acc}${tm}${headXml(n, isPerc)}${staffT}${beamT}${notations ? `<notations>${notations}</notations>` : ''}${k === 0 ? lyrT : ''}</note>`);
+                `<duration>${d}</duration>${ties}${instXml(n, isPerc, pi)}<voice>${vn}</voice>${typeT}${acc}${tm}${k === 0 ? stemT : ''}${headXml(n, isPerc, ev.slash)}${staffT}${beamT}${notations ? `<notations>${notations}</notations>` : ''}${k === 0 ? lyrT : ''}</note>`);
             });
           });
           if (v === 0) flushDirs(Infinity, a.len);
@@ -237,7 +280,7 @@ export function exportMusicXML(score) {
         if (ms.jump && JUMPS[ms.jump]) out.push(`      <direction placement="above"><direction-type><words font-style="italic" font-weight="bold">${JUMPS[ms.jump].text}</words></direction-type><sound ${JUMPS[ms.jump].to === 'segno' ? 'dalsegno="segno"' : 'dacapo="yes"'}/></direction>`);
       }
       // 右の小節線
-      const style = ms.repeatEnd || ms.barline === 'final' ? 'light-heavy' : ms.barline === 'double' ? 'light-light' : null;
+      const style = ms.repeatEnd ? 'light-heavy' : BAR_XML[ms.barline] || null;
       const es = endingStop[m];
       if (style || es || ms.repeatEnd) {
         const nums = es ? (es.nums || [1]) : null;
@@ -255,21 +298,25 @@ function artXml(art) {
   if (!art || !art.length) return '';
   const groups = { articulations: [], ornaments: [], technical: [] };
   let ferm = '';
-  for (const k of art) {
-    const x = ART_XML[k];
-    if (!x) continue;
-    if (!x[0]) ferm = '<fermata type="upright"/>';
-    else groups[x[0]].push(`<${x[1]}/>`);
+  for (const k of art) for (const [g, el] of ART_XML[k] || []) {
+    if (!g) ferm = el;
+    else if (!groups[g].includes(el)) groups[g].push(el);
   }
   return Object.entries(groups).map(([g, a]) => (a.length ? `<${g}>${a.join('')}</${g}>` : '')).join('') + ferm;
 }
 
-function harmonyXml(text, off, staffT) {
+function harmonyXml(text, off, staffT, shape = null) {
   const c = parseChord(text);
   if (!c) return `<direction placement="above"><direction-type><words>${esc(text)}</words></direction-type>${off}${staffT}</direction>`;
   const alt = (n, a) => (a ? `<${n}-alter>${a}</${n}-alter>` : '');
+  // フレット図（MusicXML の frame）：弦は 6弦 = 6、x = 弾かない
+  let frame = '';
+  if (shape) {
+    const fr = [...shape].map(ch => (ch === 'x' ? -1 : parseInt(ch, 36)));
+    frame = `<frame><frame-strings>${fr.length}</frame-strings><frame-frets>4</frame-frets>${fr.map((v, i) => (v < 0 ? '' : `<frame-note><string>${fr.length - i}</string><fret>${v}</fret></frame-note>`)).join('')}</frame>`;
+  }
   return `<harmony><root><root-step>${c.root}</root-step>${alt('root', c.alter)}</root><kind text="${esc(c.quality)}">${kindOf(c.quality)}</kind>` +
-    `${c.bass ? `<bass><bass-step>${c.bass}</bass-step>${alt('bass', c.bassAlter)}</bass>` : ''}${off}${staffT}</harmony>`;
+    `${c.bass ? `<bass><bass-step>${c.bass}</bass-step>${alt('bass', c.bassAlter)}</bass>` : ''}${frame}${off}${staffT}</harmony>`;
 }
 
 // 書き出し用：どの音に臨時記号を表示するか（浄書エンジンと同じ規則）
@@ -343,7 +390,9 @@ function guessInst(name, program) {
   return 'piano';
 }
 
-const DYN_IMPORT = { pppp: 'ppp', ppp: 'ppp', pp: 'pp', p: 'p', mp: 'mp', mf: 'mf', f: 'f', ff: 'ff', fff: 'fff', ffff: 'fff', fp: 'fp', sf: 'sf', sfz: 'sfz', sfp: 'sfp', rfz: 'rfz', rf: 'rfz', fz: 'sfz', sffz: 'sfz', sfpp: 'sfp' };
+const DYN_IMPORT = { pppp: 'pppp', ppp: 'ppp', pp: 'pp', p: 'p', mp: 'mp', mf: 'mf', f: 'f', ff: 'ff', fff: 'fff', ffff: 'ffff', fp: 'fp', sf: 'sf', sfz: 'sfz', sfp: 'sfp', rfz: 'rfz', rf: 'rf', fz: 'fz', sffz: 'sffz', sfpp: 'sfpp', n: 'n' };
+// 破線の線の頭の文字 → 線の種類
+const WORD_LINES = [[/^cresc/i, 'crescLine'], [/^dim|^decresc/i, 'dimLine'], [/^(rit|rall)/i, 'ritLine'], [/^accel/i, 'accelLine'], [/^let ring/i, 'letRing'], [/^p\.?\s*m\.?$/i, 'palmMute']];
 const JUMP_WORDS = /^(D\.?\s*C\.?|D\.?\s*S\.?|Da Capo|Dal Segno|Fine|To Coda)/i;
 
 export function importMusicXML(xmlText) {
@@ -486,7 +535,13 @@ export function importMusicXML(xmlText) {
               const w = kid(dt, 'words');
               if (w && /^[A-Za-z][A-Za-z .]{2,24}$/.test(w.text.trim()) && /(adagio|andante|allegr|moderato|presto|largo|lento|vivace|grave|tempo|rit|accel)/i.test(w.text) && bpm) text = w.text.trim();
             }
-            if (bpm && !gm[m].tempo) { gm[m].tempo = { bpm: Math.round(bpm), ...(text ? { text } : {}) }; continue; }
+            let unit = null, shown = null, hidden = false;
+            for (const dt of kids(el, 'direction-type')) { const met = kid(dt, 'metronome'); if (met) { const bu = txt(met, 'beat-unit'), dd = !!kid(met, 'beat-unit-dot'); unit = ({ quarter: 'quarter', half: 'half', eighth: 'eighth' }[bu] || null); if (unit && dd) unit += 'Dot'; shown = num(met, 'per-minute', 0) || null; hidden = met.attrs['print-object'] === 'no'; } }
+            if (bpm && !gm[m].tempo) {
+              const tp = unit && unit !== 'quarter' && shown ? { bpm: shown, unit } : { bpm: Math.round(bpm) };
+              gm[m].tempo = { ...tp, ...(text ? { text } : {}), ...(hidden && text ? { hideBpm: true } : {}) };
+              continue;
+            }
           }
           // 反復の指示
           if (snd) {
@@ -496,6 +551,9 @@ export function importMusicXML(xmlText) {
             if (snd.attrs.tocoda) gm[m].toCoda = true;
           }
           const words = kids(el, 'direction-type').map(dt => kid(dt, 'words')?.text?.trim()).filter(Boolean).join(' ');
+          // 破線の線（rit. - - -）の頭の文字は、線のほうにまとめる（文字の記号としては足さない）
+          let lineWords = kids(el, 'direction-type').some(dt => kid(dt, 'dashes')?.attrs.type === 'start');
+          const sysText = el.attrs.system === 'only-top' || el.attrs.system === 'also-top';
           if (snd && (snd.attrs.dacapo === 'yes' || snd.attrs.dalsegno)) {
             const base = snd.attrs.dalsegno ? 'ds' : 'dc';
             gm[m].jump = base + (/fine/i.test(words) ? 'Fine' : /coda/i.test(words) ? 'Coda' : '');
@@ -504,6 +562,16 @@ export function importMusicXML(xmlText) {
             for (const c of dt.children) {
               if (c.name === 'segno') gm[m].segno = true;
               else if (c.name === 'coda') gm[m].coda = true;
+              else if (c.name === 'rehearsal' && pi === 0) { const w = c.text.trim(); gm[m].reh = /^[A-Z]{1,2}$/.test(w) ? {} : { text: w }; }
+              else if (c.name === 'dashes') {
+                const ty = c.attrs.type, no = 'd' + (c.attrs.number || '1');
+                if (ty === 'start') { const ww = words || ''; const k = (WORD_LINES.find(([re]) => re.test(ww)) || [null, 'textLine'])[1]; openSpans[no] = { k, s, v: 0, a: { m, t: at }, ...(k === 'textLine' ? { text: ww } : {}) }; lineWords = true; }
+                else if (ty === 'stop' && openSpans[no]) { spansRaw.push({ ...openSpans[no], b: { m, pos: at } }); delete openSpans[no]; }
+              } else if (c.name === 'bracket') {
+                const ty = c.attrs.type, no = 'b' + (c.attrs.number || '1');
+                if (ty === 'start') openSpans[no] = { k: 'bracket', s, v: 0, a: { m, t: at } };
+                else if (ty === 'stop' && openSpans[no]) { spansRaw.push({ ...openSpans[no], b: { m, pos: at } }); delete openSpans[no]; }
+              }
               else if (c.name === 'dynamics') {
                 for (const dd of c.children) { const v = DYN_IMPORT[dd.name]; if (v) dirs[s].push({ t: at, k: 'dyn', v }); }
               } else if (c.name === 'words') {
@@ -515,6 +583,8 @@ export function importMusicXML(xmlText) {
                   else if (!snd && /^(D\.?\s*S\.?|Dal Segno)/i.test(w)) gm[m].jump = 'ds' + (/fine/i.test(w) ? 'Fine' : /coda/i.test(w) ? 'Coda' : '');
                   continue;
                 }
+                if (lineWords) continue;
+                if (sysText && pi === 0) { (gm[m].stext || (gm[m].stext = [])).push({ t: at, text: w }); continue; }
                 const pl = el.attrs.placement === 'below' ? 'below' : 'above';
                 dirs[s].push({ t: at, k: 'text', text: w, pos: pl, ...(c.attrs['font-style'] === 'italic' ? { it: true } : { it: false }) });
               } else if (c.name === 'wedge') {
@@ -523,12 +593,12 @@ export function importMusicXML(xmlText) {
                 else if (ty === 'stop' && openSpans['w' + no]) { spansRaw.push({ ...openSpans['w' + no], b: { m, pos: at } }); delete openSpans['w' + no]; }
               } else if (c.name === 'octave-shift') {
                 const ty = c.attrs.type, no = c.attrs.number || '1', size = parseInt(c.attrs.size, 10) || 8;
-                if (ty === 'down' || ty === 'up') openSpans['o' + no] = { k: ty === 'up' ? '8vb' : size >= 15 ? '15ma' : '8va', s, v: 0, a: { m, t: at } };
+                if (ty === 'down' || ty === 'up') openSpans['o' + no] = { k: ty === 'up' ? (size >= 15 ? '15mb' : '8vb') : size >= 15 ? '15ma' : '8va', s, v: 0, a: { m, t: at } };
                 else if (ty === 'stop' && openSpans['o' + no]) { spansRaw.push({ ...openSpans['o' + no], b: { m, pos: at } }); delete openSpans['o' + no]; }
               } else if (c.name === 'pedal') {
                 const ty = c.attrs.type;
                 if ((ty === 'stop' || ty === 'change') && openSpans.ped) { spansRaw.push({ ...openSpans.ped, b: { m, pos: at } }); delete openSpans.ped; }
-                if (ty === 'start' || ty === 'change') openSpans.ped = { k: 'ped', s, v: 0, a: { m, t: at } };
+                if (ty === 'start' || ty === 'change') openSpans.ped = { k: c.attrs.line === 'yes' && c.attrs.sign !== 'yes' ? 'pedL' : 'ped', s, v: 0, a: { m, t: at } };
               }
             }
           }
@@ -542,14 +612,14 @@ export function importMusicXML(xmlText) {
           const bs = kid(el, 'bass');
           const text = txt(r0, 'root-step') + accs(Math.round(num(r0, 'root-alter', 0))) + q + (bs ? '/' + txt(bs, 'bass-step') + accs(Math.round(num(bs, 'bass-alter', 0))) : '');
           dirs[staffOf(el)].push({ t: at, k: 'chord', text });
+          if (kid(el, 'frame')) dirs[staffOf(el)].push({ t: at, k: 'fret', text });
         } else if (el.name === 'barline') {
           const rep = kid(el, 'repeat');
           if (pi === 0) {
             const st = txt(el, 'bar-style');
             if (rep?.attrs.direction === 'forward') gm[m].repeatStart = true;
             if (rep?.attrs.direction === 'backward') gm[m].repeatEnd = { times: parseInt(rep.attrs.times, 10) || 2 };
-            else if (st === 'light-heavy') gm[m].barline = 'final';
-            else if (st === 'light-light') gm[m].barline = 'double';
+            else if (st && XML_BAR[st] && el.attrs.location !== 'left') gm[m].barline = XML_BAR[st];
             const en = kid(el, 'ending');
             if (en && en.attrs.type === 'start') endingOpen = { m, nums: (en.attrs.number || '1').split(/[,\s]+/).map(Number).filter(Boolean) };
             if (en && (en.attrs.type === 'stop' || en.attrs.type === 'discontinue') && endingOpen) {
@@ -611,24 +681,55 @@ export function importMusicXML(xmlText) {
               if (tups.some(t => t.attrs.type === 'stop')) tupletId[key].left = 0;
             }
             if (pendingGrace[key]) { ev.grace = pendingGrace[key]; delete pendingGrace[key]; }
+            // 小さい音符・符尾なし（スラッシュ）
+            if (kid(el, 'cue') || kid(el, 'type')?.attrs.size === 'cue') ev.small = true;
+            if (txt(el, 'stem') === 'none' && txt(el, 'notehead') === 'slash' && pitch) ev.slash = true;
             (bucket[key] = bucket[key] || []).push({ start, ev, ticks });
             lastEv = { ev, start };
             pos += ticks;
             maxPos = Math.max(maxPos, pos);
           }
           if (!ev) continue;
+          // この音（和音の中の1音）：符頭の形・括弧・注意の臨時記号・運指・弦番号
+          const thisNote = pitch && ev.notes.find(q => q.step === pitch.step && q.octave === pitch.octave && q.alter === pitch.alter);
+          if (thisNote && !ev.slash) {
+            const nh = kid(el, 'notehead');
+            if (nh && XML_HEAD[nh.text.trim()] && !thisNote.drum) thisNote.head = XML_HEAD[nh.text.trim()];
+            if (nh && nh.attrs.parentheses === 'yes') thisNote.paren = true;
+            const ac = kid(el, 'accidental');
+            if (ac && (ac.attrs.cautionary === 'yes' || ac.attrs.parentheses === 'yes')) thisNote.acc = true;
+          }
           // アーティキュレーション・装飾記号・スラー・トリル線
           for (const n of ntn) for (const c of n.children) {
-            if (c.name === 'fermata') addArt(ev, 'ferm');
-            else if (c.name === 'articulations' || c.name === 'ornaments' || c.name === 'technical') {
+            if (c.name === 'fermata') addArt(ev, FERM_XML[c.text.trim()] || 'ferm');
+            else if (c.name === 'arpeggiate') ev.arp = c.attrs.direction === 'up' || c.attrs.direction === 'down' ? c.attrs.direction : 'normal';
+            else if (c.name === 'non-arpeggiate') ev.arp = 'bracket';
+            else if (c.name === 'glissando' || c.name === 'slide') {
+              const no = 'g' + (c.attrs.number || '1');
+              if (c.attrs.type === 'start') openSpans[no] = { k: 'gliss', s, v, a: { m, t: start } };
+              else if (c.attrs.type === 'stop' && openSpans[no]) { spansRaw.push({ ...openSpans[no], b: { m, t: start } }); delete openSpans[no]; }
+            } else if (c.name === 'articulations' || c.name === 'ornaments' || c.name === 'technical') {
               const wavy = kids(c, 'wavy-line');
+              const hasTr = !!kid(c, 'trill-mark');
               for (const a of c.children) {
                 if (a.name === 'trill-mark' && wavy.some(w => w.attrs.type === 'start')) continue;
+                if (a.name === 'breath-mark') { addArt(ev, a.text.trim() === 'tick' ? 'breathT' : 'breath'); continue; }
+                if (a.name === 'caesura') { addArt(ev, a.text.trim() === 'short' ? 'caesuraS' : 'caesura'); continue; }
+                if (a.name === 'turn' && a.attrs.slash === 'yes') { addArt(ev, 'turnSlash'); continue; }
+                if (a.name === 'tremolo') { const tt = a.attrs.type || 'single'; if (tt === 'single' || tt === 'unmeasured') ev.trem = tt === 'unmeasured' ? 'z' : Math.max(1, Math.min(3, parseInt(a.text, 10) || 1)); continue; }
+                if (c.name === 'technical' && (a.name === 'fingering' || a.name === 'pluck') && thisNote) { thisNote.fing = a.text.trim(); continue; }
+                if (c.name === 'technical' && a.name === 'string' && thisNote && !kid(c, 'fret')) { thisNote.str = parseInt(a.text, 10) || 1; thisNote.strMark = true; continue; }
+                if (a.name === 'stopped' && a.attrs.smufl === 'pluckedLeftHandPizzicato') { addArt(ev, 'lhpizz'); continue; }
+                if (a.name === 'other-ornament' && /tremblement/i.test(a.attrs.smufl || '')) { addArt(ev, 'trembl'); continue; }
                 if (XML_ART[a.name]) addArt(ev, XML_ART[a.name]);
               }
+              // アクセント＋スタッカートなどの組み合わせ
+              const ar = ev.art || [];
+              const both = (x, y, z) => { if (ar.includes(x) && ar.includes(y)) { ev.art = ar.filter(q => q !== x && q !== y); ev.art.push(z); } };
+              both('acc', 'stacc', 'accStacc'); both('acc', 'ten', 'tenAcc'); both('marc', 'stacc', 'marcStacc');
               for (const w of wavy) {
                 const no = 't' + (w.attrs.number || '1');
-                if (w.attrs.type === 'start') openSpans[no] = { k: 'trill', s, v, a: { m, t: start } };
+                if (w.attrs.type === 'start') openSpans[no] = { k: hasTr || !/vibrato/i.test(w.attrs.smufl || '') ? 'trill' : 'vib', s, v, a: { m, t: start } };
                 else if (w.attrs.type === 'stop' && openSpans[no]) { spansRaw.push({ ...openSpans[no], b: { m, t: start } }); delete openSpans[no]; }
               }
             } else if (c.name === 'slur') {
@@ -646,6 +747,7 @@ export function importMusicXML(xmlText) {
             const lyr = ev.lyr || (ev.lyr = []);
             while (lyr.length < verse) lyr.push(null);
             lyr[verse] = syl === 'begin' || syl === 'middle' ? { t, h: true } : { t };
+            if (kid(ly, 'extend')) lyr[verse].ext = true;
           }
         }
       }
@@ -724,7 +826,7 @@ export function importMusicXML(xmlText) {
       if (b.m < sp.a.m || (b.m === sp.a.m && b.t < sp.a.t)) continue;
       const sm = st.measures[sp.a.m];
       const t = Math.min(sp.a.t, A[sp.a.m].len - 1);
-      (sm.spans || (sm.spans = [])).push({ k: sp.k, v: sp.v, t: onsetCovering(sm, sp.v, t), dm: b.m - sp.a.m, t2: b.t });
+      (sm.spans || (sm.spans = [])).push({ k: sp.k, v: sp.v, t: onsetCovering(sm, sp.v, t), dm: b.m - sp.a.m, t2: b.t, ...(sp.text ? { text: sp.text } : {}) });
     }
     delete part._raw; delete part._spans;
     // TAB の譜表：五線があればそれにつなぐ（中身は五線から作るので捨てる）。TAB だけのパートは五線を作る
@@ -761,9 +863,11 @@ function pitchXml(n, perc) {
   return `<pitch><step>${n.step}</step>${n.alter ? `<alter>${n.alter}</alter>` : ''}<octave>${n.octave}</octave></pitch>`;
 }
 function instXml(n, perc, pi) { return perc ? `<instrument id="P${pi + 1}-I${DRUMS.indexOf(drumOf(n)) + 1}"/>` : ''; }
-function headXml(n, perc) {
-  const h = perc ? drumOf(n).head : null;
-  return h ? `<notehead>${{ x: 'x', circlex: 'circle-x', diamond: 'diamond' }[h]}</notehead>` : '';
+function headXml(n, perc, slash = false) {
+  const h = perc ? drumOf(n).head : slash ? 'slash' : n.head;
+  const name = h ? HEAD_XML[h] : null;
+  if (!name && !n.paren) return '';
+  return `<notehead${n.paren ? ' parentheses="yes"' : ''}>${name || 'normal'}</notehead>`;
 }
 function spellTune(midi) {
   const names = [['C', 0], ['C', 1], ['D', 0], ['E', -1], ['E', 0], ['F', 0], ['F', 1], ['G', 0], ['G', 1], ['A', 0], ['B', -1], ['B', 0]];

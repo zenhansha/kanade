@@ -10,10 +10,13 @@
 //   ・rit. / rall.（だんだん遅く）・accel.（だんだん速く）・meno mosso / più mosso・a tempo
 //   ・スウィング（8分音符を跳ねる）、拍の頭を少し強く、人間らしい小さな揺れ
 //   ・ドラム譜（GM ドラム）、ミキサー（音量・左右・ミュート・ソロ）、メトロノーム・カウントイン
-import { TPQ, midiOf, keyAlter, fromDiatonic, diatonic, beatTicks } from '../core/music.js';
+// Phase 4
+//   ・フェルマータの長さの違い、ブレス・カエスーラの間、アルペジオ（和音をずらして）、トレモロ、グリッサンド
+//   ・rit. / accel. の線（線の終わりまで変化）、小節の繰り返し記号、コードネームを鳴らす、ループ再生
+import { TPQ, TYPE_TICKS, TYPE_FLAGS, midiOf, keyAlter, fromDiatonic, diatonic, beatTicks } from '../core/music.js';
 import { measureAttrs, INST } from '../core/score.js';
 import { positions } from '../core/edit.js';
-import { playOrder, DYNAMICS, SPANS, spanEnd } from '../core/marks.js';
+import { playOrder, DYNAMICS, SPANS, spanEnd, ARTICS, isFermata, parseChord } from '../core/marks.js';
 import { DRUM, drumOf } from '../core/perc.js';
 
 const DEFAULT_VEL = 0.7;
@@ -29,7 +32,13 @@ const TEMPO_WORDS = [
 ];
 
 export function playbackSettings(score) {
-  return { human: true, swing: 0, click: false, countIn: 1, ...(score.settings?.playback || {}) };
+  return { human: true, swing: 0, click: false, countIn: 1, chords: false, ...(score.settings?.playback || {}) };
+}
+// 小節の繰り返し記号（sm.mrep）の小節は、記号のない直前の小節の中身で鳴らす
+function soundingMeasure(st, m) {
+  let k = m;
+  while (k > 0 && st.measures[k]?.mrep) k--;
+  return st.measures[k];
 }
 
 // opts: { linear: 反復を無視して順番どおり, tempoScale: テンポの倍率（録音の練習用）, human: 表情付き再生の上書き }
@@ -44,8 +53,16 @@ export function buildPerformance(score, opts = {}) {
   // ── フェルマータ：その音の長さのぶん、全パートの時間を止める ──
   const pauses = A.map(() => []);
   forEachEvent(score, (ev, x, m) => {
-    if (!ev.art || !ev.art.includes('ferm')) return;
-    const add = ((x.end - x.start) / TPQ) * (60 / (A[m].bpm * scale));
+    if (!ev.art) return;
+    // フェルマータ：音の長さ × 種類ごとの倍率。ブレス・カエスーラ：決まった秒数の間
+    let add = 0;
+    for (const k of ev.art) {
+      const a = ARTICS[k];
+      if (!a) continue;
+      if (isFermata(k)) add = Math.max(add, ((x.end - x.start) / TPQ) * (60 / (A[m].bpm * scale)) * (a.pause ?? 1));
+      else if (a.gap) add = Math.max(add, a.gap / scale);
+    }
+    if (!add) return;
     const ex = pauses[m].find(p => p.t === x.end);
     if (ex) ex.add = Math.max(ex.add, add); else pauses[m].push({ t: x.end, add });
   });
@@ -61,11 +78,23 @@ export function buildPerformance(score, opts = {}) {
     const w = TEMPO_WORDS.find(x => x.re.test(d.text.trim()));
     if (w && !words[m].some(q => q.t === d.t)) words[m].push({ t: d.t, w });
   }));
+  score.measures.forEach((ms, m) => (ms.stext || []).forEach(d => {
+    const w = TEMPO_WORDS.find(x => x.re.test((d.text || '').trim()));
+    if (w && !words[m].some(q => q.t === d.t)) words[m].push({ t: d.t, w });
+  }));
+  // rit. - - - / accel. - - - の線：線の終わりまでかけて変える
+  for (const part of score.parts) for (const st of part.staves) st.measures.forEach((sm, m) => (sm.spans || []).forEach(sp => {
+    const D0 = SPANS[sp.k];
+    if (!D0?.tempo || words[m].some(q => q.t === sp.t)) return;
+    words[m].push({ t: sp.t, w: { ramp: D0.tempo, until: spanEnd(m, sp) } });
+  }));
   const evs = [];
   order.forEach((m, i) => {
     if (score.measures[m].tempo && i > 0) evs.push({ g: gStart[i], w: { reset: true } });
     words[m].sort((a, b) => a.t - b.t).forEach(q => evs.push({ g: gStart[i] + q.t, w: q.w, i }));
   });
+  // 線の終わり（演奏順の位置）
+  const gOf = (i, mm, tt) => { let j = i; while (j < order.length && order[j] !== mm) j++; return j < order.length ? gStart[j] + tt : null; };
   const pts = [{ g: 0, f: 1, step: true }];
   const fAt = (x) => {
     let k = 0;
@@ -80,7 +109,9 @@ export function buildPerformance(score, opts = {}) {
     else if (e.w.step) pts.push({ g: e.g, f: cur * e.w.step, step: true });
     else if (e.w.ramp) {
       // 次のテンポの指示か、次の小節の終わりまでで変化させ、そのあとはそのテンポのまま
-      const i = e.i, limit = i + 1 < order.length ? gStart[i + 1] + A[order[i + 1]].len : gStart[i] + A[order[i]].len;
+      const i = e.i;
+      const until = e.w.until ? gOf(i, e.w.until.m, e.w.until.t + TPQ) : null;
+      const limit = until ?? (i + 1 < order.length ? gStart[i + 1] + A[order[i + 1]].len : gStart[i] + A[order[i]].len);
       const end = Math.min(limit, evs[k + 1] ? evs[k + 1].g : Infinity);
       pts.push({ g: e.g, f: cur, step: true }, { g: Math.max(e.g + RES, end), f: Math.max(0.35, Math.min(2.5, cur * e.w.ramp)) });
     }
@@ -146,19 +177,20 @@ export function buildPerformance(score, opts = {}) {
     const staves = part.staves.map((st, s) => ({ st, s })).filter(x => x.st.tabOf == null);
     // 強弱は譜表ごと。強弱記号がない譜表（ピアノの左手など）は1段目のものを使う
     const curves = part.staves.map(st => dynamicCurve(st, A, absT));
-    const hasDyn = part.staves.map(st => st.measures.some(sm => sm.dirs?.some(d => d.k === 'dyn')) || st.measures.some(sm => sm.spans?.some(sp => sp.k === 'cresc' || sp.k === 'dim')));
+    const hasDyn = part.staves.map(st => st.measures.some(sm => sm.dirs?.some(d => d.k === 'dyn')) || st.measures.some(sm => sm.spans?.some(sp => sp.k === 'cresc' || sp.k === 'dim' || SPANS[sp.k]?.dyn)));
     staves.forEach(({ st, s }) => {
       const perc = st.clef === 'percussion';
       const curve = hasDyn[s] ? curves[s] : curves[0];
-      const shifts = [], peds = [], trills = [];
+      const shifts = [], peds = [], trills = [], glisses = [];
       st.measures.forEach((sm, m) => (sm.spans || []).forEach(sp => {
         const e = spanEnd(m, sp);
         if (e.m >= A.length) return;
         const endEv = eventAt(st, e.m, sp.v, e.t);
         const item = { a: absT(m, sp.t), b: absT(e.m, endEv ? endEv.end : e.t + TPQ), m, e: { m: e.m, t: endEv ? endEv.end : e.t + TPQ } };
         if (SPANS[sp.k]?.shift) shifts.push({ ...item, shift: SPANS[sp.k].shift });
-        if (sp.k === 'ped') peds.push(item);
+        if (sp.k === 'ped' || sp.k === 'pedL') peds.push(item);
         if (sp.k === 'trill') trills.push(item);
+        if (sp.k === 'gliss') glisses.push({ a: absT(m, sp.t), to: endEv && !endEv.ev.rest ? endEv.ev.notes[endEv.ev.notes.length - 1] : null });
       }));
       const inSpan = (list, at) => list.find(x => at >= x.a && at < x.b);
       const maxV = Math.max(...st.measures.map(sm => sm.voices.length));
@@ -166,7 +198,7 @@ export function buildPerformance(score, opts = {}) {
         let pending = new Map(); // midi → 伸ばし中の音（タイ）
         order.forEach((m, i) => {
           if (i > 0 && order[i - 1] !== m - 1) pending = new Map();
-          const voice = st.measures[m].voices[v];
+          const voice = soundingMeasure(st, m).voices[v];
           if (!voice) { pending = new Map(); return; }
           const fifths = A[m].fifths;
           for (const x of positions(voice)) {
@@ -174,21 +206,20 @@ export function buildPerformance(score, opts = {}) {
             let start = tickToSec(i, x.start);
             const end = tickToSec(i, x.end);
             const next = new Map();
-            if (!ev.rest) {
+            if (!ev.rest && !ev.slash) {
               const at = absT(m, x.start);
               const art = ev.art || [];
               const shift = perc ? 0 : inSpan(shifts, at)?.shift || 0;
               const ped = perc ? null : inSpan(peds, at);
               let vel = curve.velAt(at) + curve.accentAt(at) + beatAccent(m, x.start);
-              if (art.includes('acc')) vel += 0.14;
-              if (art.includes('marc')) vel += 0.2;
+              let lf = null;
+              for (const k of art) { const a = ARTICS[k]; if (!a) continue; if (a.vel) vel += a.vel; if (a.len != null) lf = lf == null ? a.len : Math.min(lf, a.len); }
+              if (ev.small) vel -= 0.08;
               if (human) { vel += jitter(nk, 0.035); start += jitter(nk + 7, 0.006); nk++; }
               vel = Math.max(0.08, Math.min(1, vel));
               let len = end - start;
-              if (art.includes('stacc')) len *= 0.5;
-              else if (art.includes('staccss')) len *= 0.3;
-              else if (art.includes('marc')) len *= 0.75;
-              else if (!art.includes('ten')) len -= Math.min(0.03, len * 0.08);
+              if (lf != null && lf < 1) len *= lf;
+              else if (lf == null) len -= Math.min(0.03, len * 0.08);
               const base = { program: part.program, sf: inst.sf, p, s, v, m, t: x.start, id: ev.id, ids: [ev.id], i };
               if (perc) {
                 // ドラム：長さは関係なく叩くだけ。装飾音（フラム）も
@@ -205,20 +236,36 @@ export function buildPerformance(score, opts = {}) {
                   midi: midiOf(n) + oct + shift, vel: vel * 0.85,
                 })));
               }
-              const orn = art.includes('tr') || inSpan(trills, at) ? 'tr' : art.includes('mord') ? 'mord' : art.includes('prall') ? 'prall' : art.includes('turn') ? 'turn' : null;
-              for (const n of ev.notes) {
+              const orn = art.includes('tr') || inSpan(trills, at) ? 'tr' : ['mord', 'prall', 'turn', 'invTurn', 'turnSlash', 'haydn', 'trembl'].find(k => art.includes(k)) || null;
+              // トレモロ：符尾の斜線の本数ぶん細かくした長さで同じ音を連打（z = 速い連打）
+              const tremN = ev.trem ? (ev.trem === 'z' ? Math.max(2, Math.round((end - start) / 0.045)) : Math.max(1, Math.round(evTicksOf(x) / (TYPE_TICKS.quarter / Math.pow(2, (TYPE_FLAGS[ev.type] || 0) + (+ev.trem)))))) : 0;
+              // アルペジオ：下から（down は上から）少しずつずらして弾く
+              const roll = ev.arp && ev.arp !== 'bracket' && ev.notes.length > 1 ? Math.min(0.06, (end - start) / (ev.notes.length + 1)) : 0;
+              const gl = glisses.find(q => q.a === at);
+              ev.notes.forEach((n, ni) => {
                 const midi = midiOf(n) + oct + shift;
                 let nn = pending.get(midi);
+                const off = roll ? (ev.arp === 'down' ? ev.notes.length - 1 - ni : ni) * roll : 0;
                 if (nn) { nn.end = Math.max(nn.end, start + len); nn.ids.push(ev.id); }
                 else if (orn && n === ev.notes[ev.notes.length - 1]) {
                   ornament(notes, orn, n, fifths, { ...base, start, end: start + len, oct: oct + shift, vel });
+                } else if (tremN > 1) {
+                  const d = (end - start) / tremN;
+                  for (let q = 0; q < tremN; q++) notes.push({ ...base, start: start + q * d, end: start + (q + 1) * d - Math.min(0.02, d * 0.2), midi, vel: vel * (q ? 0.92 : 1), ids: [ev.id] });
+                } else if (gl && gl.to && n === ev.notes[ev.notes.length - 1]) {
+                  // グリッサンド：前半はその音、後半で次の音まで半音ずつすべらせる
+                  const to = midiOf(gl.to) + oct + shift;
+                  const steps = Math.abs(to - midi);
+                  const t1 = start + len * 0.4, d = steps ? (end - t1) / steps : 0;
+                  notes.push({ ...base, start, end: t1, midi, vel, ids: [ev.id] });
+                  for (let q = 1; q < steps; q++) notes.push({ ...base, start: t1 + (q - 1) * d, end: t1 + q * d, midi: midi + Math.sign(to - midi) * q, vel: vel * 0.8, ids: [ev.id] });
                 } else {
-                  nn = { ...base, start, end: start + len, midi, vel, ids: [ev.id] };
+                  nn = { ...base, start: start + off, end: start + len, midi, vel, ids: [ev.id] };
                   notes.push(nn);
                 }
                 if (nn && ped) nn.end = Math.max(nn.end, secAhead(i, ped.e.m, ped.e.t) - 0.02);
                 if (nn && n.tie) next.set(midi, nn);
-              }
+              });
             }
             pending = next;
           }
@@ -226,6 +273,22 @@ export function buildPerformance(score, opts = {}) {
       }
     });
   });
+  // コードネームを鳴らす（再生の設定で「コードネームを鳴らす」をオンにしたとき）：ピアノの音で、次のコードまで
+  if (PB.chords) {
+    const cs = [];
+    score.parts.forEach((part, p) => part.staves.forEach(st => st.measures.forEach((sm, m) => (sm.dirs || []).forEach(d => {
+      if (d.k === 'chord' && parseChord(d.text)) cs.push({ m, t: d.t, c: parseChord(d.text), p });
+    }))));
+    cs.sort((a, b) => a.m - b.m || a.t - b.t);
+    order.forEach((m, i) => {
+      const here = cs.filter(c => c.m === m);
+      here.forEach((c, j) => {
+        const nxt = here[j + 1];
+        const start = tickToSec(i, c.t), end = nxt ? tickToSec(i, nxt.t) : tickToSec(i, A[m].len);
+        for (const midi of chordMidis(c.c)) notes.push({ program: 0, sf: 'acoustic_grand_piano', p: c.p, s: 0, v: 9, m, t: c.t, id: null, ids: [], i, start, end: end - 0.03, midi, vel: 0.42 });
+      });
+    });
+  }
   notes.sort((a, b) => a.start - b.start);
   // メトロノーム：拍ごと（小節の頭は強く）
   const clicks = [];
@@ -255,6 +318,27 @@ export function buildPerformance(score, opts = {}) {
   return { notes, clicks, total, order, seqStart, tickToSec, secToPos, secOfMeasure, attrs: A, scale };
 }
 
+// コードネーム → 鳴らす音（ルートを低く、その上に3和音か4和音。テンションは省略）
+function chordMidis(c) {
+  const SEMI = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+  const root = 48 + ((SEMI[c.root] + c.alter + 12) % 12);
+  const q = c.quality;
+  let iv = [0, 4, 7];
+  if (/^(m(?!aj)|min|-)/.test(q)) iv = [0, 3, 7];
+  if (/dim|°/.test(q)) iv = [0, 3, 6];
+  if (/aug|\+/.test(q)) iv = [0, 4, 8];
+  if (/sus4|sus(?!2)/.test(q)) iv = [0, 5, 7];
+  if (/sus2/.test(q)) iv = [0, 2, 7];
+  if (/maj7|M7|Δ/.test(q)) iv = [...iv, 11];
+  else if (/m7b5|ø/.test(q)) iv = [0, 3, 6, 10];
+  else if (/dim7/.test(q)) iv = [0, 3, 6, 9];
+  else if (/7|9|11|13/.test(q)) iv = [...iv, 10];
+  if (/6/.test(q) && !/7/.test(q)) iv = [...iv, 9];
+  const bass = c.bass ? 36 + ((SEMI[c.bass] + c.bassAlter + 12) % 12) : root - 12;
+  return [bass, ...iv.map(x => root + 12 + x)];
+}
+const evTicksOf = (x) => x.end - x.start;
+
 function forEachEvent(score, fn) {
   for (const part of score.parts) for (const st of part.staves) st.measures.forEach((sm, m) => sm.voices.forEach(v => v && positions(v).forEach(x => fn(x.ev, x, m))));
 }
@@ -279,11 +363,12 @@ function dynamicCurve(st, A, absT) {
   const base = (at) => { let v = DEFAULT_VEL; for (const q of pts) { if (q.at <= at) v = q.vel; else break; } return v; };
   const hairs = [];
   st.measures.forEach((sm, m) => (sm.spans || []).forEach(sp => {
-    if (sp.k !== 'cresc' && sp.k !== 'dim') return;
+    const dk = SPANS[sp.k]?.dyn || sp.k;
+    if (dk !== 'cresc' && dk !== 'dim') return;
     const e = spanEnd(m, sp);
     if (e.m >= A.length) return;
     const endEv = eventAt(st, e.m, sp.v, e.t);
-    hairs.push({ a: absT(m, sp.t), b: absT(e.m, endEv ? endEv.end : e.t + TPQ), up: sp.k === 'cresc' });
+    hairs.push({ a: absT(m, sp.t), b: absT(e.m, endEv ? endEv.end : e.t + TPQ), up: dk === 'cresc' });
   }));
   for (const h of hairs) {
     const from = base(h.a);
@@ -315,7 +400,7 @@ function ornament(notes, kind, n, fifths, o) {
     let t = o.start, k = 0;
     while (t < o.end - step * 0.5) { seq.push({ midi: k % 2 ? up : main, start: t, end: Math.min(o.end, t + step) }); t += step; k++; }
   } else {
-    const head = kind === 'mord' ? [main, down] : kind === 'prall' ? [main, up] : [up, main, down];
+    const head = kind === 'mord' ? [main, down] : kind === 'prall' ? [main, up] : kind === 'invTurn' || kind === 'turnSlash' ? [down, main, up] : kind === 'trembl' ? [up, main, up] : [up, main, down];
     head.forEach((mm, i) => seq.push({ midi: mm, start: o.start + i * step, end: o.start + (i + 1) * step }));
     seq.push({ midi: main, start: o.start + head.length * step, end: Math.max(o.end, o.start + (head.length + 1) * step) });
   }
@@ -362,7 +447,8 @@ export class Player {
     }
     const pre = [];
     for (let k = 0; k < nBeats; k++) pre.push({ start: fromSec - countSec + k * beatSec, accent: k % Math.max(1, Math.round(a0.full / beatTicks(a0.time))) === 0, click: true });
-    this.queue = [...pre, ...clicks, ...perf.notes.filter(n => n.start >= fromSec - 1e-6)].sort((a, b) => a.start - b.start);
+    const qEnd = opts.loop ? perf.secOfMeasure(opts.loop.m2 + 1) : Infinity;
+    this.queue = [...pre, ...clicks, ...perf.notes.filter(n => n.start >= fromSec - 1e-6 && n.start < qEnd - 1e-6)].sort((a, b) => a.start - b.start);
     // 外部 MIDI 音源：パートごとにチャンネル（ドラムは 10ch）と音色を送っておく
     this.chOf = [];
     if (this.midiOut?.out) {
@@ -380,9 +466,12 @@ export class Player {
     this.playing = true;
     this.timer = setInterval(() => this.pump(), 25);
     this.pump();
+    // ループ再生：opts.loop = { m1, m2 }（その範囲の終わりまで来たら頭に戻る）
+    const loopEnd = opts.loop ? perf.secOfMeasure(opts.loop.m2 + 1) : null;
     const frame = () => {
       if (!this.playing) return;
       const pos = this.position();
+      if (loopEnd != null && pos >= loopEnd - 0.01) { const o = { ...opts }; this.stop(true); this.start(score, opts.loop.m1, { ...o, countIn: 0 }); return; }
       if (pos > perf.total + 0.3 && !opts.keepGoing) { this.stop(); return; }
       if (this.onTick && pos >= fromSec) this.onTick(perf.secToPos(Math.min(pos, perf.total - 1e-6)), pos);
       this.raf = requestAnimationFrame(frame);

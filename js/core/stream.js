@@ -193,7 +193,7 @@ function buildEvents(slots, kept, a) {
     }
     pieces.forEach((ev, i) => { if (i === pieces.length - 1) ev.notes.forEach(n => (n.tie = !!x.tieOut)); });
     // 記号・歌詞・装飾音は最初の音符に
-    if (x.head && pieces[0]) for (const k of ['art', 'lyr', 'grace']) if (x.item[k]) pieces[0][k] = JSON.parse(JSON.stringify(x.item[k]));
+    if (x.head && pieces[0]) for (const k of EV_KEYS) if (x.item[k] != null) pieces[0][k] = JSON.parse(JSON.stringify(x.item[k]));
     evs.push(...pieces);
     cur = x.end;
   }
@@ -201,6 +201,9 @@ function buildEvents(slots, kept, a) {
   if (evs.every(e => e.rest && !e.tuplet)) return [measureRest(len)];
   return evs;
 }
+
+// 音符に付いている記号など（書き直しても最初の音符に残すもの）
+const EV_KEYS = ['art', 'lyr', 'grace', 'arp', 'trem', 'small', 'stem', 'slash'];
 
 function sortPitches(ps) { return ps.sort((a, b) => diatonic(a) - diatonic(b) || (a.alter || 0) - (b.alter || 0)); }
 
@@ -221,7 +224,7 @@ export function readStream(score, p, s, v, m1, m2, A = measureAttrs(score)) {
       if (same) open.end = b;
       else {
         const it = { start: a, end: b, pitches: ev.notes.map(n => { const q = { ...n }; delete q.tie; return q; }) };
-        for (const k of ['art', 'lyr', 'grace']) if (ev[k]) it[k] = ev[k];
+        for (const k of EV_KEYS) if (ev[k] != null) it[k] = ev[k];
         items.push(it);
         open = it;
       }

@@ -15,22 +15,117 @@ import { positions, findEvent, nextEvent, getVoice, staffMeasure, expandMeasureR
 import { transposeInterval, fifthsForSemis, spellMidi, midiOf, diatonic, fromDiatonic, keyAlter } from './music.js';
 
 // ───────── 一覧（パレット・メニュー・浄書・再生・MusicXML で共通に使う） ─────────
-// g = SMuFL のグリフ名（Above/Below があるものは付けずに書く）、side: 'note' = 符頭側、'above' = 常に譜表の上
+// g = SMuFL のグリフ名。ab = 「Above / Below」の2つの形がある（付けずに書いて、上下で付け足す）
+// side: 'note' = 符頭の側（譜表の中にも置く）、'above' = 譜表の外（声部2なら下）、'after' = 音符の右上（ブレス）、
+//       'before' = 符頭の左（スクープ）、'right' = 符頭の右（フォール）
+// cat = パレットの分類、len = 再生の長さの倍率、vel = 強さの足し算、pause = フェルマータの止まる長さ（音符の長さの何倍）
 export const ARTICS = {
-  stacc: { ja: 'スタッカート', g: 'articStaccato', side: 'note', key: 'Shift+S' },
-  staccss: { ja: 'スタッカーティッシモ', g: 'articStaccatissimo', side: 'note' },
-  ten: { ja: 'テヌート', g: 'articTenuto', side: 'note', key: 'Shift+N' },
-  acc: { ja: 'アクセント', g: 'articAccent', side: 'note', key: 'Shift+V' },
-  marc: { ja: 'マルカート', g: 'articMarcato', side: 'above', key: 'Shift+O' },
-  ferm: { ja: 'フェルマータ', g: 'fermata', side: 'above', key: 'Shift+U' },
-  tr: { ja: 'トリル', g: 'ornamentTrill', side: 'above', single: true },
-  mord: { ja: 'モルデント', g: 'ornamentMordent', side: 'above', single: true },
-  prall: { ja: 'プラルトリラー', g: 'ornamentShortTrill', side: 'above', single: true },
-  turn: { ja: 'ターン', g: 'ornamentTurn', side: 'above', single: true },
-  down: { ja: 'ダウンボウ', g: 'stringsDownBow', side: 'above', single: true },
-  up: { ja: 'アップボウ', g: 'stringsUpBow', side: 'above', single: true },
-  breath: { ja: 'ブレス', g: 'breathMarkComma', side: 'after', single: true },
+  stacc: { ja: 'スタッカート', g: 'articStaccato', ab: true, side: 'note', key: 'Shift+S', cat: 'artic', len: 0.5 },
+  staccss: { ja: 'スタッカーティッシモ', g: 'articStaccatissimo', ab: true, side: 'note', cat: 'artic', len: 0.3 },
+  wedge: { ja: 'スタッカーティッシモ（くさび）', g: 'articStaccatissimoWedge', ab: true, side: 'note', cat: 'artic', len: 0.3, vel: 0.05 },
+  ten: { ja: 'テヌート', g: 'articTenuto', ab: true, side: 'note', key: 'Shift+N', cat: 'artic', len: 1 },
+  portato: { ja: 'ポルタート（テヌート＋スタッカート）', g: 'articTenutoStaccato', ab: true, side: 'note', cat: 'artic', len: 0.75 },
+  acc: { ja: 'アクセント', g: 'articAccent', ab: true, side: 'note', key: 'Shift+V', cat: 'artic', vel: 0.14 },
+  accStacc: { ja: 'アクセント＋スタッカート', g: 'articAccentStaccato', ab: true, side: 'note', cat: 'artic', len: 0.5, vel: 0.14 },
+  tenAcc: { ja: 'アクセント＋テヌート', g: 'articTenutoAccent', ab: true, side: 'note', cat: 'artic', len: 1, vel: 0.14 },
+  marc: { ja: 'マルカート', g: 'articMarcato', ab: true, side: 'above', key: 'Shift+O', cat: 'artic', len: 0.75, vel: 0.2 },
+  marcStacc: { ja: 'マルカート＋スタッカート', g: 'articMarcatoStaccato', ab: true, side: 'above', cat: 'artic', len: 0.5, vel: 0.2 },
+  stress: { ja: 'ストレス（強調）', g: 'articStress', ab: true, side: 'note', cat: 'artic', vel: 0.08 },
+  unstress: { ja: 'アンストレス（弱く）', g: 'articUnstress', ab: true, side: 'note', cat: 'artic', vel: -0.1 },
+  soft: { ja: 'ソフトアクセント', g: 'articSoftAccent', ab: true, side: 'note', cat: 'artic', vel: 0.06 },
+  ferm: { ja: 'フェルマータ', g: 'fermata', ab: true, side: 'above', key: 'Shift+U', cat: 'breath', pause: 1 },
+  fermS: { ja: '短いフェルマータ', g: 'fermataShort', ab: true, side: 'above', cat: 'breath', pause: 0.5 },
+  fermL: { ja: '長いフェルマータ', g: 'fermataLong', ab: true, side: 'above', cat: 'breath', pause: 1.6 },
+  fermVS: { ja: 'とても短いフェルマータ', g: 'fermataVeryShort', ab: true, side: 'above', cat: 'breath', pause: 0.3 },
+  fermVL: { ja: 'とても長いフェルマータ', g: 'fermataVeryLong', ab: true, side: 'above', cat: 'breath', pause: 2.2 },
+  breath: { ja: 'ブレス', g: 'breathMarkComma', side: 'after', single: true, cat: 'breath', len: 0.85, gap: 0.08 },
+  breathT: { ja: 'ブレス（チェック）', g: 'breathMarkTick', side: 'after', single: true, cat: 'breath', len: 0.85, gap: 0.08 },
+  caesura: { ja: 'カエスーラ（間）', g: 'caesura', side: 'after', single: true, cat: 'breath', len: 0.9, gap: 0.4 },
+  caesuraS: { ja: '短いカエスーラ', g: 'caesuraShort', side: 'after', single: true, cat: 'breath', len: 0.9, gap: 0.2 },
+  tr: { ja: 'トリル', g: 'ornamentTrill', side: 'above', single: true, cat: 'orn' },
+  mord: { ja: 'モルデント（下）', g: 'ornamentMordent', side: 'above', single: true, cat: 'orn' },
+  prall: { ja: 'プラルトリラー（上）', g: 'ornamentShortTrill', side: 'above', single: true, cat: 'orn' },
+  turn: { ja: 'ターン', g: 'ornamentTurn', side: 'above', single: true, cat: 'orn' },
+  invTurn: { ja: '逆ターン', g: 'ornamentTurnInverted', side: 'above', single: true, cat: 'orn' },
+  turnSlash: { ja: 'ターン（斜線つき）', g: 'ornamentTurnSlash', side: 'above', single: true, cat: 'orn' },
+  haydn: { ja: 'ハイドン・ターン', g: 'ornamentHaydn', side: 'above', single: true, cat: 'orn' },
+  trembl: { ja: 'トランブルマン', g: 'ornamentTremblement', side: 'above', single: true, cat: 'orn' },
+  down: { ja: 'ダウンボウ', g: 'stringsDownBow', side: 'above', single: true, cat: 'tech' },
+  up: { ja: 'アップボウ', g: 'stringsUpBow', side: 'above', single: true, cat: 'tech' },
+  harm: { ja: 'ハーモニクス（○）', g: 'stringsHarmonic', side: 'above', single: true, cat: 'tech' },
+  open: { ja: '開放（o）', g: 'brassMuteOpen', side: 'above', single: true, cat: 'tech' },
+  stopped: { ja: 'ストップ（＋）', g: 'brassMuteClosed', side: 'above', single: true, cat: 'tech' },
+  snap: { ja: 'バルトーク・ピチカート', g: 'pluckedSnapPizzicato', ab: true, side: 'above', single: true, cat: 'tech' },
+  lhpizz: { ja: '左手ピチカート', g: 'pluckedLeftHandPizzicato', side: 'above', single: true, cat: 'tech' },
+  thumb: { ja: '親指（チェロ）', g: 'stringsThumbPosition', side: 'above', single: true, cat: 'tech' },
+  scoop: { ja: 'スクープ（しゃくり）', g: 'brassScoop', side: 'before', single: true, cat: 'jazz' },
+  plop: { ja: 'プロップ', g: 'brassPlop', side: 'before', single: true, cat: 'jazz' },
+  doit: { ja: 'ドゥイット', g: 'brassDoitMedium', side: 'right', single: true, cat: 'jazz' },
+  fall: { ja: 'フォール', g: 'brassFallLipMedium', side: 'right', single: true, cat: 'jazz' },
 };
+// アーティキュレーションの見た目のグリフ（上に置くか下に置くかで形が変わるもの）
+export const articGlyph = (key, below) => { const a = ARTICS[key]; return a.ab ? a.g + (below ? 'Below' : 'Above') : a.g; };
+// 同時に付けない組み合わせ（どれか1つ）
+export const ARTIC_EXCL = [
+  ['stacc', 'staccss', 'wedge', 'portato', 'accStacc', 'marcStacc'],
+  ['acc', 'marc', 'accStacc', 'tenAcc', 'marcStacc', 'stress', 'soft'],
+  ['ten', 'portato', 'tenAcc'],
+  ['ferm', 'fermS', 'fermL', 'fermVS', 'fermVL'],
+  ['breath', 'breathT', 'caesura', 'caesuraS'],
+  ['up', 'down'],
+  ['tr', 'mord', 'prall', 'turn', 'invTurn', 'turnSlash', 'haydn', 'trembl'],
+];
+export const isFermata = (k) => k === 'ferm' || k === 'fermS' || k === 'fermL' || k === 'fermVS' || k === 'fermVL';
+
+// ───────── 音符そのものの見た目（Phase 4） ─────────
+// 符頭の形（n.head）。drum の符頭と同じ組み立て：black = 4分以下、half = 2分、whole = 全音符
+export const NOTEHEADS = {
+  x: { ja: '× 符頭', black: 'noteheadXBlack', half: 'noteheadXHalf', whole: 'noteheadXWhole', xml: 'x' },
+  circlex: { ja: '⊗ 符頭', black: 'noteheadCircleX', half: 'noteheadCircleX', whole: 'noteheadCircleX', xml: 'circle-x' },
+  diamond: { ja: 'ひし形（ハーモニクス）', black: 'noteheadDiamondBlack', half: 'noteheadDiamondWhite', whole: 'noteheadDiamondWhole', xml: 'diamond' },
+  slash: { ja: 'スラッシュ', black: 'noteheadSlashHorizontalEnds', half: 'noteheadSlashWhiteHalf', whole: 'noteheadSlashWhiteWhole', xml: 'slash' },
+  triangle: { ja: '三角', black: 'noteheadTriangleUpBlack', half: 'noteheadTriangleUpHalf', whole: 'noteheadTriangleUpWhole', xml: 'triangle' },
+  square: { ja: '四角', black: 'noteheadSquareBlack', half: 'noteheadSquareWhite', whole: 'noteheadSquareWhite', xml: 'square' },
+  plus: { ja: '＋ 符頭', black: 'noteheadPlusBlack', half: 'noteheadPlusHalf', whole: 'noteheadPlusWhole', xml: 'cross' },
+};
+// アルペジオ（ev.arp）
+export const ARPS = {
+  normal: { ja: 'アルペジオ' }, up: { ja: 'アルペジオ（下から上）' }, down: { ja: 'アルペジオ（上から下）' }, bracket: { ja: 'アルペジオしない（カッコ）' },
+};
+// トレモロ（ev.trem：符尾に付ける斜線の本数。'z' はバズロール）
+export const TREMS = { 1: { ja: 'トレモロ（1本）', g: 'tremolo1' }, 2: { ja: 'トレモロ（2本）', g: 'tremolo2' }, 3: { ja: 'トレモロ（3本）', g: 'tremolo3' }, z: { ja: 'バズロール（z）', g: 'buzzRoll' } };
+// 運指（n.fing）。数字と、ギターの右手 p i m a
+export const FINGERS = { 0: 'fingering0', 1: 'fingering1', 2: 'fingering2', 3: 'fingering3', 4: 'fingering4', 5: 'fingering5', p: 'fingeringPLower', i: 'fingeringILower', m: 'fingeringMLower', a: 'fingeringALower', t: 'fingeringTLower' };
+// 小節線の種類（score.measures[m].barline）
+export const BARLINES = {
+  double: { ja: '複縦線', xml: 'light-light' }, final: { ja: '終止線', xml: 'light-heavy' }, dashed: { ja: '点線（破線）', xml: 'dashed' },
+  dotted: { ja: '点線', xml: 'dotted' }, heavy: { ja: '太線', xml: 'heavy' }, heavyHeavy: { ja: '太い複縦線', xml: 'heavy-heavy' },
+  tick: { ja: '短い線（上だけ）', xml: 'tick' }, short: { ja: '短い線（真ん中）', xml: 'short' }, none: { ja: '小節線なし', xml: 'none' },
+};
+// ギターのコードの押さえ方（フレット図）。6弦 → 1弦の順、x = 弾かない、0 = 開放
+export const FRET_LIB = {
+  C: 'x32010', D: 'xx0232', E: '022100', F: '133211', G: '320003', A: 'x02220', B: 'x24442',
+  Cm: 'x35543', Dm: 'xx0231', Em: '022000', Fm: '133111', Gm: '355333', Am: 'x02210', Bm: 'x24432',
+  C7: 'x32310', D7: 'xx0212', E7: '020100', F7: '131211', G7: '320001', A7: 'x02020', B7: 'x21202',
+  Cm7: 'x35343', Dm7: 'xx0211', Em7: '020000', Fm7: '131111', Gm7: '353333', Am7: 'x02010', Bm7: 'x24232',
+  Cmaj7: 'x32000', Dmaj7: 'xx0222', Emaj7: '021100', Fmaj7: 'xx3210', Gmaj7: '320002', Amaj7: 'x02120', Bmaj7: 'x24342',
+  Csus4: 'x33011', Dsus4: 'xx0233', Esus4: '022200', Gsus4: '330013', Asus4: 'x02230', Cadd9: 'x32030', Dsus2: 'xx0230', Asus2: 'x02200',
+  'C#m': 'x46654', 'F#m': '244222', 'G#m': '466444', 'D#m': 'x68876', 'F#': '244322', 'C#': 'x46664', 'G#': '466544',
+  Bb: 'x13331', Eb: 'x68886', Ab: '466544', Db: 'x46664', Gb: '244322', Bbm: 'x13321', Ebm: 'x68876',
+  'F#m7': '242222', 'C#m7': 'x46454', Bb7: 'x13131', Eb7: 'x68686', Ab7: '464544', Bbmaj7: 'x13231', Ebmaj7: 'x68786', Abmaj7: '465544',
+  Cdim: 'x3424x', Ddim: 'xx0101', Bdim: 'x2343x', Caug: 'x32110', Gaug: '321003', Bm7b5: 'x2323x', 'F#m7b5': '2x221x', Em7b5: '0x020x',
+};
+export function fretShape(name) {
+  const c = parseChord(name);
+  if (!c) return null;
+  const root = c.root + (c.alter > 0 ? '#' : c.alter < 0 ? 'b' : '');
+  const q = c.quality.replace(/^(M7|Δ7?|ma7)/, 'maj7').replace(/^(min|mi|-)/, 'm');
+  const minor = q.startsWith('m') && !q.startsWith('maj');
+  // そのままの形 → 「m7 / 7 / m」のような近い形 → 根音だけ、の順に探す
+  const cands = [q, minor && q.includes('7') ? 'm7' : null, !minor && q.includes('7') && !q.startsWith('maj') ? '7' : null, minor ? 'm' : ''];
+  for (const x of cands) if (x != null && FRET_LIB[root + x]) return FRET_LIB[root + x];
+  return null;
+}
 
 // 強弱記号：glyph と再生の強さ（0〜1）
 export const DYNAMICS = {
@@ -40,8 +135,11 @@ export const DYNAMICS = {
   fp: { g: 'dynamicFortePiano', vel: 0.44, accent: 0.78 }, sf: { g: 'dynamicSforzando', accent: 0.9 },
   sfz: { g: 'dynamicSforzato', accent: 0.95 }, sfp: { g: 'dynamicSforzandoPiano', vel: 0.44, accent: 0.9 },
   rfz: { g: 'dynamicRinforzando2', accent: 0.88 },
+  pppp: { g: 'dynamicPPPP', vel: 0.15 }, ffff: { g: 'dynamicFFFF', vel: 1 }, fz: { g: 'dynamicForzando', accent: 0.9 },
+  sffz: { g: 'dynamicSforzatoFF', accent: 1 }, sfpp: { g: 'dynamicSforzandoPianissimo', vel: 0.32, accent: 0.9 },
+  sfzp: { g: 'dynamicSforzatoPiano', vel: 0.44, accent: 0.95 }, rf: { g: 'dynamicRinforzando1', accent: 0.86 }, n: { g: 'dynamicNiente', vel: 0.1 },
 };
-export const DYN_ORDER = ['ppp', 'pp', 'p', 'mp', 'mf', 'f', 'ff', 'fff', 'fp', 'sf', 'sfz', 'sfp', 'rfz'];
+export const DYN_ORDER = ['pppp', 'ppp', 'pp', 'p', 'mp', 'mf', 'f', 'ff', 'fff', 'ffff', 'fp', 'sf', 'sfz', 'sffz', 'sfp', 'sfpp', 'sfzp', 'fz', 'rf', 'rfz', 'n'];
 
 // よく使う文字の表情記号（Finale の「発想記号」セレクタに相当）
 export const TEXT_PRESETS = [
@@ -63,6 +161,19 @@ export const SPANS = {
   '15ma': { ja: '15ma（2オクターブ上で演奏）', shift: 24, g: 'quindicesimaAlta' },
   ped: { ja: 'ペダル（Ped. 〜 *）' },
   trill: { ja: 'トリル（波線つき）' },
+  // Phase 4
+  '15mb': { ja: '15mb（2オクターブ下で演奏）', shift: -24, g: 'quindicesimaBassaMb' },
+  pedL: { ja: 'ペダル（線で示す）' },
+  crescLine: { ja: 'cresc. - - -（文字のクレッシェンド）', text: 'cresc.', dyn: 'cresc' },
+  dimLine: { ja: 'dim. - - -（文字のディミヌエンド）', text: 'dim.', dyn: 'dim' },
+  ritLine: { ja: 'rit. - - -（だんだん遅く）', text: 'rit.', above: true, tempo: 0.72 },
+  accelLine: { ja: 'accel. - - -（だんだん速く）', text: 'accel.', above: true, tempo: 1.25 },
+  vib: { ja: 'ヴィブラート（波線）', above: true },
+  gliss: { ja: 'グリッサンド（次の音まで）', pair: true },
+  letRing: { ja: 'let ring（響かせる）', text: 'let ring', above: true, hook: true },
+  palmMute: { ja: 'P.M.（パームミュート）', text: 'P.M.', above: true, hook: true },
+  bracket: { ja: 'カッコ線（上）', text: '', above: true, hook: true, solid: true },
+  textLine: { ja: '文字＋線（自由に入力）', text: '', above: true, hook: true, custom: true },
 };
 
 // 反復の「飛ぶ」指示
@@ -78,19 +189,44 @@ export const JUMPS = {
 // ───────── アーティキュレーション ─────────
 // ids の音符すべてに付ける（全部に付いていたら外す）。休符にはフェルマータだけ付けられる
 export function toggleArtic(score, ids, key) {
-  const evs = ids.map(id => findEvent(score, id)?.ev).filter(ev => ev && (!ev.rest || key === 'ferm'));
+  // 休符にはフェルマータ・ブレス・カエスーラだけ付けられる
+  const restOk = isFermata(key) || ARTICS[key]?.side === 'after';
+  const evs = ids.map(id => findEvent(score, id)?.ev).filter(ev => ev && (!ev.rest || restOk));
   if (!evs.length) return null;
   const on = !evs.every(ev => ev.art && ev.art.includes(key));
   for (const ev of evs) {
     const a = (ev.art || []).filter(k => k !== key);
     if (on) {
+      // 同時に付けない組み合わせ（スタッカートとスタッカーティッシモ、アクセントとマルカート …）は入れ替える
+      const ex = new Set(ARTIC_EXCL.filter(g => g.includes(key)).flat());
+      a.splice(0, a.length, ...a.filter(k => !ex.has(k)));
       a.push(key);
-      // 同時に付けない組み合わせ（スタッカートとスタッカーティッシモ、アクセントとマルカート）
-      const excl = { stacc: 'staccss', staccss: 'stacc', acc: 'marc', marc: 'acc', up: 'down', down: 'up' }[key];
-      if (excl) a.splice(0, a.length, ...a.filter(k => k !== excl));
     }
     if (a.length) ev.art = a; else delete ev.art;
   }
+  return on;
+}
+
+// 音符そのものの設定（Phase 4）：アルペジオ・トレモロ・小さい音符・符尾の向き・連桁・スラッシュ
+//   ids の音符すべてに prop = value を付ける。同じ値が全部に付いていたら外す（トグル）
+export function setEventProp(score, ids, prop, value) {
+  const evs = ids.map(id => findEvent(score, id)?.ev).filter(ev => ev && !ev.mr && (prop === 'small' || prop === 'beam' || !ev.rest));
+  if (!evs.length) return null;
+  const on = !evs.every(ev => ev[prop] === value);
+  for (const ev of evs) { if (on && value != null) ev[prop] = value; else delete ev[prop]; }
+  return on;
+}
+// 1つ1つの音（和音の中の音）の設定：符頭の形・運指・括弧。noteIndex を指定するとその音だけ
+export function setNoteProp(score, ids, prop, value, noteIndex = null) {
+  const notes = [];
+  for (const id of ids) {
+    const ev = findEvent(score, id)?.ev;
+    if (!ev || ev.rest) continue;
+    ev.notes.forEach((n, i) => { if (noteIndex == null || noteIndex === i) notes.push(n); });
+  }
+  if (!notes.length) return null;
+  const on = !notes.every(n => n[prop] === value);
+  for (const n of notes) { if (on && value != null && value !== '') n[prop] = value; else delete n[prop]; }
   return on;
 }
 export function clearArtics(score, ids) {
@@ -383,7 +519,22 @@ export function writtenScore(score) {
 // 小節に「何か」があるか（パート譜で休みの小節をまとめるときの判定）
 export function measureHasMarks(score, m) {
   const ms = score.measures[m];
-  return !!(ms.repeatStart || ms.repeatEnd || ms.ending || ms.segno || ms.coda || ms.fine || ms.toCoda || ms.jump || ms.sysBreak);
+  return !!(ms.repeatStart || ms.repeatEnd || ms.ending || ms.segno || ms.coda || ms.fine || ms.toCoda || ms.jump || ms.sysBreak || ms.reh || ms.stext);
+}
+
+// 練習番号：自動（A, B, C … Z, AA …）なら、楽譜の頭から数えた順番で文字を決める
+export function rehearsalLabels(score) {
+  const out = {};
+  let n = 0;
+  score.measures.forEach((ms, m) => {
+    if (!ms.reh) return;
+    if (ms.reh.text) { out[m] = ms.reh.text; return; }
+    if (ms.reh.num) { out[m] = String(m + 1); return; }
+    let k = n++, s = '';
+    do { s = String.fromCharCode(65 + (k % 26)) + s; k = Math.floor(k / 26) - 1; } while (k >= 0);
+    out[m] = s;
+  });
+  return out;
 }
 
 export { fromDiatonic };

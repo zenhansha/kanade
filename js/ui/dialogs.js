@@ -2,8 +2,7 @@
 import { INSTRUMENTS, INST, TEMPLATES, createScore, createPart, fillMeasures, measureAttrs } from '../core/score.js';
 import * as E from '../core/edit.js';
 import { keyNameJa, CLEFS, TPQ, TYPE_TICKS } from '../core/music.js';
-import { storage, canPickFiles } from '../io/storage.js';
-import { ARTICS, DYNAMICS, DYN_ORDER, TEXT_PRESETS, SPANS, JUMPS } from '../core/marks.js';
+import { ARTICS, DYNAMICS, DYN_ORDER, TEXT_PRESETS, SPANS, JUMPS, articGlyph } from '../core/marks.js';
 import { SMUFL } from '../smufl.js';
 const G = SMUFL.glyphs;
 
@@ -37,15 +36,21 @@ export class Dialogs {
     this.closeMenu();
     const m = document.createElement('div');
     m.className = 'menu';
-    m.innerHTML = items.map((it, i) => it === '-' ? '<hr>' : it.head ? `<div class="mh">${it.head}</div>` : `<button data-i="${i}">${it.label}${it.kbd ? `<kbd>${it.kbd}</kbd>` : ''}</button>`).join('');
+    m.innerHTML = items.map((it, i) => it === '-' ? '<hr>' : it.head ? `<div class="mh">${it.head}</div>` : `<button data-i="${i}"${it.dis ? ' disabled' : ''}>${it.label}${it.kbd ? `<kbd>${it.kbd}</kbd>` : ''}</button>`).join('');
     document.body.appendChild(m);
-    // anchor はボタン（その下に開く）か {x, y}（右クリックした位置に開く）。下に入らなければ上に開く
-    if (!anchor) { const pal = document.getElementById('palette').getBoundingClientRect(); anchor = { x: Math.max(8, window.innerWidth / 2 - 140), y: pal.top - 4 }; }
+    this.placeMenu(m, anchor);
+    m.onclick = (e) => { const b = e.target.closest('[data-i]'); if (!b) return; this.closeMenu(); items[+b.dataset.i].run(); };
+    this.trackMenu(m);
+  }
+  // anchor はボタン（その下に開く）か {x, y}（右クリックした位置に開く）。下に入らなければ上に開く
+  placeMenu(m, anchor, alignRight = false) {
+    if (!anchor) { const tb = document.getElementById('topbar').getBoundingClientRect(); anchor = { x: Math.max(8, window.innerWidth / 2 - 160), y: tb.bottom + 4 }; }
     const isEl = !!anchor.getBoundingClientRect;
-    const r = isEl ? anchor.getBoundingClientRect() : { left: anchor.x, top: anchor.y, bottom: anchor.y };
+    const r = isEl ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
     const gap = isEl ? 6 : 2;
     const mw = m.offsetWidth, mh = m.offsetHeight;
-    m.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, r.left)) + 'px';
+    const x = alignRight ? r.right - mw : r.left;
+    m.style.left = Math.max(8, Math.min(window.innerWidth - mw - 8, x)) + 'px';
     const below = window.innerHeight - r.bottom - gap - 8, above = r.top - gap - 8;
     if (mh > below && above > below) {
       m.style.top = Math.max(8, r.top - gap - mh) + 'px';
@@ -55,87 +60,34 @@ export class Dialogs {
       m.style.maxHeight = below + 'px';
     }
     m.style.overflow = 'auto';
-    m.onclick = (e) => { const b = e.target.closest('[data-i]'); if (!b) return; this.closeMenu(); items[+b.dataset.i].run(); };
+  }
+  // メニューの外を押したら閉じる
+  trackMenu(m) {
     setTimeout(() => { this.outside = (e) => { if (!m.contains(e.target)) this.closeMenu(); }; window.addEventListener('pointerdown', this.outside, true); });
     this.menuEl = m;
+  }
+  // 1行の文字を入れてもらう（prompt の代わり。iPad でも見やすく、Enter で決定）
+  ask(title, hint, value, cb) {
+    this.open({
+      title: esc(title), narrow: true,
+      body: `<label class="field"><span>${esc(hint || '')}</span><input id="askIn" value="${esc(value || '')}" enterkeyhint="done" autocomplete="off"></label>`,
+      onOpen: (bd) => {
+        const inp = bd.querySelector('#askIn');
+        setTimeout(() => { inp.focus(); inp.select(); }, 40);
+        inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); const v = inp.value.trim(); this.close(); cb(v); } if (e.key === 'Escape') this.close(); });
+      },
+      buttons: [{ label: 'キャンセル' }, { label: 'OK', cls: 'primary', onClick: (bd) => { const v = bd.querySelector('#askIn').value.trim(); setTimeout(() => cb(v)); } }],
+    });
   }
   closeMenu() {
     if (this.menuEl) { this.menuEl.remove(); this.menuEl = null; }
     if (this.outside) { window.removeEventListener('pointerdown', this.outside, true); this.outside = null; }
   }
 
-  // ── ファイルメニュー ──
-  fileMenu(anchor) {
-    const a = this.app;
-    this.menu(anchor, [
-      { label: '新規作成…', kbd: 'Alt+N', run: () => this.newScore() },
-      { label: '開く…', kbd: 'Ctrl+O', run: () => this.openList() },
-      ...(canPickFiles ? [
-        { label: '保存' + (a.fileName ? `（${esc(a.fileName)}）` : '…'), kbd: 'Ctrl+S', run: () => a.saveToFile() },
-        { label: '名前を付けて保存…', kbd: 'Ctrl+Shift+S', run: () => a.saveToFile(true) },
-      ] : [
-        { label: '.kanade ファイルに書き出す（PC へ渡す）', kbd: 'Ctrl+Shift+S', run: () => a.saveToFile(true) },
-      ]),
-      { label: '複製を作る', run: () => this.duplicate() },
-      '-',
-      { label: 'MusicXML を読み込む…（Finale から）', run: () => a.openFileDialog() },
-      { label: 'MusicXML に書き出す', kbd: 'Ctrl+E', run: () => a.exportXML() },
-      { label: 'MIDI ファイルを読み込む…（.mid）', run: () => a.openFileDialog() },
-      { label: 'MIDI ファイルに書き出す', run: () => a.tools.exportMidi() },
-      { label: 'オーディオ（WAV）に書き出す', run: () => a.tools.exportWav() },
-      { label: '印刷 / PDF に保存', kbd: 'Ctrl+P', run: () => a.print() },
-      '-',
-      ...(a.isInstalled ? [] : [{ label: 'アプリとしてインストール…', run: () => a.install() }]),
-      { label: (a.state.colorVoices ? '✓ ' : '') + '声部を色分けして表示', run: () => { a.state.colorVoices = !a.state.colorVoices; document.body.classList.toggle('color-voices', a.state.colorVoices); } },
-      { label: (a.synth.useSamples ? '✓ ' : '') + '高音質音源を使う（ネット接続時）', run: () => { a.synth.useSamples = !a.synth.useSamples; a.toast(a.synth.useSamples ? '高音質音源：オン' : '内蔵シンセで再生します'); } },
-      { label: '使い方・ショートカット', kbd: '?', run: () => this.help() },
-    ]);
-  }
-
-  async openList() {
-    const docs = await storage.list();
-    const top = `<div class="openfile"><button class="btn primary" id="olFile">${canPickFiles ? 'PC のファイルを開く…' : '「ファイル」から開く…'}</button>
-      <span>.kanade・MusicXML（.musicxml / .xml / .mxl）${canPickFiles ? '。ウィンドウにドラッグ＆ドロップでも開けます' : ''}</span></div>
-      <div class="mh2">最近の楽譜（この端末に自動保存）</div>`;
-    const body = top + (docs.length ? `<div class="doclist">${docs.map(d => `<div class="doc" data-id="${d.id}"><span class="nm">${esc(d.title)}${d.fileName ? `<small>${esc(d.fileName)}</small>` : ''}</span><span class="dt">${new Date(d.updated).toLocaleString('ja-JP')}</span><button data-del="${d.id}" title="削除">削除</button></div>`).join('')}</div>` : '<p>まだ保存された楽譜はありません。</p>');
-    this.open({
-      title: '開く', body,
-      buttons: [{ label: '閉じる' }],
-      onOpen: (bd) => {
-        bd.querySelector('#olFile').onclick = () => { this.close(); this.app.openFileDialog(); };
-        bd.querySelectorAll('.doc').forEach(el => el.addEventListener('click', async (e) => {
-          const del = e.target.closest('[data-del]');
-          if (del) {
-            e.stopPropagation();
-            if (del.dataset.del === this.app.docId) return this.app.toast('開いている楽譜は削除できません');
-            if (!confirm('この楽譜を削除しますか？（元に戻せません）')) return;
-            await storage.remove(del.dataset.del);
-            el.remove();
-            return;
-          }
-          await this.app.save();
-          const doc = await storage.get(el.dataset.id);
-          if (doc) { this.app.openDoc(doc); this.app.view.resetZoom(); this.app.relayout(); this.app.view.scroller.scrollTo({ top: 0 }); }
-          this.close();
-        }));
-      },
-    });
-  }
-
-  async duplicate() {
-    const a = this.app;
-    await a.save();
-    const sc = JSON.parse(JSON.stringify(a.score));
-    sc.meta.title = (sc.meta.title || '無題') + ' のコピー';
-    a.newDoc(sc);
-    a.relayout();
-    a.toast('複製しました');
-  }
-
   // ── 新規作成ウィザード（Finale のセットアップウィザードに相当） ──
-  newScore(first = false) {
-    let insts = ['piano'];
-    let tmpl = 'piano';
+  newScore(first = false, tmplId = null) {
+    let tmpl = tmplId || 'piano';
+    let insts = [...(TEMPLATES.find(t => t.id === tmpl)?.insts || ['piano'])];
     let time = [4, 4];
     let fifths = 0;
     const famOrder = [...new Set(INSTRUMENTS.map(i => i.fam))];
@@ -177,10 +129,11 @@ export class Dialogs {
           });
           if (!first) this.app.save();
           this.app.newDoc(score);
+          if (this.app.home?.visible) { this.app.home.canBack = true; this.app.home.hide(); }
           this.app.view.resetZoom();
           this.app.state.mode = 'input';
           this.app.relayout();
-          this.app.view.scroller.scrollTo({ top: 0 });
+          this.app.view.scroller.scrollTo({ top: 0, left: 0 });
           this.app.toast('入力モードです：五線をタップするか、A〜G キー / MIDI 鍵盤で入力できます', 3200);
         } },
       ],
@@ -221,10 +174,11 @@ export class Dialogs {
         <label class="field"><span>サブタイトル</span><input id="siSub" value="${esc(m.subtitle)}"></label>
         <div class="row"><label class="field"><span>作曲者</span><input id="siComp" value="${esc(m.composer)}"></label>
         <label class="field"><span>作詞者</span><input id="siLyr" value="${esc(m.lyricist)}"></label></div>
-        <label class="field"><span>編曲者</span><input id="siArr" value="${esc(m.arranger)}"></label>`,
+        <div class="row"><label class="field"><span>編曲者</span><input id="siArr" value="${esc(m.arranger)}"></label>
+        <label class="field"><span>著作権（1ページ目の下）</span><input id="siCopy" value="${esc(m.copyright)}"></label></div>`,
       buttons: [{ label: 'キャンセル' }, { label: 'OK', cls: 'primary', onClick: (bd) => {
         const v = (id) => bd.querySelector(id).value.trim();
-        this.app.edit('スコア情報', () => { Object.assign(this.app.score.meta, { title: v('#siTitle'), subtitle: v('#siSub'), composer: v('#siComp'), lyricist: v('#siLyr'), arranger: v('#siArr') }); });
+        this.app.edit('スコア情報', () => { Object.assign(this.app.score.meta, { title: v('#siTitle'), subtitle: v('#siSub'), composer: v('#siComp'), lyricist: v('#siLyr'), arranger: v('#siArr'), copyright: v('#siCopy') }); });
       } }],
     });
   }
@@ -265,7 +219,7 @@ export class Dialogs {
       body: `<div class="chips" id="tsCh">${TIMES.map(([b, t]) => `<button class="chip${b === cur.beats && t === cur.beatType ? ' on' : ''}" data-b="${b}" data-tt="${t}">${b}/${t}</button>`).join('')}<button class="chip" data-sym="common">C（4/4）</button><button class="chip" data-sym="cut">¢（2/2）</button></div>
         <div class="row" style="margin-top:12px"><label class="field"><span>拍の数</span><input id="tsB" type="number" inputmode="numeric" value="${cur.beats}" min="1" max="32"></label>
         <label class="field"><span>拍の単位</span><select id="tsT">${[1, 2, 4, 8, 16, 32].map(x => `<option${x === cur.beatType ? ' selected' : ''}>${x}</option>`).join('')}</select></label></div>
-        <p style="color:var(--muted);font-size:13px;margin:4px 0 0">※ 今の版では、小節からはみ出す音符は切り捨て、足りない分は休符で埋めます（Finale の「小節の再構成」は今後対応）。</p>`,
+        <label class="ck" style="margin-top:8px"><input type="checkbox" id="tsRebar" checked><span>音符を新しい小節線で組み直す（Finale の「小節の再構成」。はみ出す音はタイで次の小節へ）</span></label>`,
       onOpen: (bd) => {
         bd.querySelector('#tsCh').onclick = (e) => {
           const c = e.target.closest('.chip'); if (!c) return;
@@ -277,7 +231,7 @@ export class Dialogs {
       buttons: [{ label: 'キャンセル' }, { label: 'OK', cls: 'primary', onClick: (bd) => {
         const time = { beats: Math.max(1, +bd.querySelector('#tsB').value || 4), beatType: +bd.querySelector('#tsT').value };
         if (bd.dataset.sym) time.symbol = bd.dataset.sym;
-        a.edit('拍子の変更', () => E.setTime(a.score, m, time));
+        a.insertTime(time, bd.querySelector('#tsRebar').checked);
       } }],
     });
   }
@@ -334,8 +288,11 @@ export class Dialogs {
     const ms = a.score.measures[m];
     this.open({
       title: `テンポ（第${m + 1}小節から）`, narrow: true,
-      body: `<div class="row"><label class="field"><span>4分音符 = </span><input id="tpB" type="number" inputmode="numeric" value="${cur}" min="20" max="400"></label>
+      body: `<div class="row"><label class="field"><span>拍の単位</span><select id="tpU">${[['quarter', '♩ 4分音符'], ['half', '𝅗𝅥 2分音符'], ['eighth', '♪ 8分音符'], ['quarterDot', '♩. 付点4分（6/8 など）'], ['halfDot', '𝅗𝅥. 付点2分'], ['eighthDot', '♪. 付点8分']].map(([v, l]) => `<option value="${v}"${(ms.tempo?.unit || 'quarter') === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label class="field"><span>＝（1分間にいくつ）</span><input id="tpB" type="number" inputmode="numeric" value="${ms.tempo?.bpm ?? cur}" min="20" max="400"></label></div>
+        <div class="row">
         <label class="field"><span>表示する文字（任意）</span><input id="tpT" value="${esc(ms.tempo?.text || '')}" placeholder="Allegro など"></label></div>
+        <label class="ck" style="margin:0 0 10px"><input type="checkbox" id="tpH"${ms.tempo?.hideBpm ? ' checked' : ''}><span>文字だけ表示する（数字は出さない・再生には使う）</span></label>
         <div class="chips">${[['Largo', 50], ['Adagio', 66], ['Andante', 80], ['Moderato', 100], ['Allegretto', 112], ['Allegro', 132], ['Presto', 168]].map(([n, b]) => `<button class="chip" data-n="${n}" data-b="${b}">${n} ${b}</button>`).join('')}</div>`,
       onOpen: (bd) => { bd.querySelector('.chips').onclick = (e) => { const c = e.target.closest('.chip'); if (!c) return; bd.querySelector('#tpB').value = c.dataset.b; bd.querySelector('#tpT').value = c.dataset.n; }; },
       buttons: [
@@ -344,7 +301,8 @@ export class Dialogs {
         { label: 'OK', cls: 'primary', onClick: (bd) => {
           const bpm = Math.max(20, Math.min(400, +bd.querySelector('#tpB').value || 100));
           const text = bd.querySelector('#tpT').value.trim();
-          a.edit('テンポ', () => { a.score.measures[m].tempo = { bpm, ...(text ? { text } : {}) }; });
+          const unit = bd.querySelector('#tpU').value, hide = bd.querySelector('#tpH').checked;
+          a.edit('テンポ', () => { a.score.measures[m].tempo = { bpm, ...(text ? { text } : {}), ...(unit !== 'quarter' ? { unit } : {}), ...(hide && text ? { hideBpm: true } : {}) }; });
         } },
       ],
     });
@@ -395,7 +353,7 @@ export class Dialogs {
     let items;
     if (kind === 'art') {
       items = [{ head: 'アーティキュレーション・装飾記号（選んだ音符に付ける／外す）' }, ...Object.entries(ARTICS).map(([k, x]) => ({
-        label: `${mg(x.side === 'note' || k === 'ferm' || k === 'marc' ? x.g + 'Above' : x.g)}${x.ja}`, kbd: x.key || '', run: () => a.toggleArtic(k),
+        label: `${mg(articGlyph(k, false))}${x.ja}`, kbd: x.key || '', run: () => a.toggleArtic(k),
       }))];
     } else if (kind === 'expr') {
       items = [{ head: '強弱記号' }, ...DYN_ORDER.map(v => ({ label: `${mg(DYNAMICS[v].g)}<span class="ml">${v}</span>`, run: () => a.addDynamic(v) })),
@@ -479,31 +437,6 @@ export class Dialogs {
     });
   }
 
-  // ── 表示メニュー（スコア / パート譜・記譜音） ──
-  viewMenu(anchor) {
-    const a = this.app;
-    const vo = a.viewOpts;
-    this.menu(anchor, [
-      { head: '表示する楽譜' },
-      { label: (vo.part == null ? '✓ ' : '') + 'スコア（全パート）', run: () => a.setView({ part: null }) },
-      ...a.score.parts.map((p, i) => ({ label: (vo.part === i ? '✓ ' : '') + 'パート譜：' + esc(p.name), run: () => a.setView({ part: i }) })),
-      '-',
-      { label: (vo.transposed ? '✓ ' : '') + '移調楽器を記譜音で表示（B♭クラリネットなど）', run: () => { a.setView({ transposed: !vo.transposed }); a.toast(vo.transposed ? '記譜音で表示しています（タップ・音名キーも記譜音で入力）' : '実音（コンサートピッチ）で表示しています'); } },
-      { label: (vo.multiRest ? '✓ ' : '') + 'パート譜で続く休みを1つにまとめる', run: () => a.setView({ multiRest: !vo.multiRest }) },
-    ]);
-  }
-
-  // ── スコアメニュー（楽器の追加・削除など） ──
-  scoreMenu(anchor) {
-    this.menu(anchor, [
-      { label: 'スコア情報（タイトル・作曲者）…', run: () => this.scoreInfo() },
-      { label: '楽器の追加・削除・並べ替え…', run: () => this.instruments() },
-      { label: '譜表サイズ・ページ設定…', run: () => this.pageSetup() },
-      { label: 'ページレイアウト（段の間隔・1段の小節数・余白）…', run: () => this.app.tools.pageLayout() },
-      { label: '再生の設定・ミキサー…', run: () => this.app.tools.playback() },
-    ]);
-  }
-
   instruments() {
     const a = this.app;
     const sc = a.score;
@@ -547,11 +480,13 @@ export class Dialogs {
     this.open({
       title: '譜表サイズ・ページ設定', narrow: true,
       body: `<label class="field"><span>五線の高さ（mm）：標準 7.0、小さめ 6.0、大きめ 8.0</span><input id="psH" type="number" step="0.1" min="4" max="12" value="${s.staffMm}"></label>
-        <label class="field"><span>用紙</span><select id="psP"><option value="210x297"${s.page.w === 210 ? ' selected' : ''}>A4 縦</option><option value="297x210"${s.page.w === 297 ? ' selected' : ''}>A4 横</option><option value="257x364"${s.page.w === 257 ? ' selected' : ''}>B4 縦</option><option value="216x279"${s.page.w === 216 ? ' selected' : ''}>レター</option></select></label>`,
+        <label class="field"><span>用紙</span><select id="psP">${[['210x297', 'A4 縦'], ['297x210', 'A4 横'], ['257x364', 'B4 縦'], ['364x257', 'B4 横'], ['182x257', 'B5 縦'], ['297x420', 'A3 縦'], ['216x279', 'レター'], ['229x305', '9×12 インチ（楽譜用）'], ['148x210', 'A5 縦']].map(([v, l]) => `<option value="${v}"${s.page.w + 'x' + s.page.h === v ? ' selected' : ''}>${l}</option>`).join('')}</select></label>
+        <div class="row">${['t', 'b', 'l', 'r'].map(k => `<label class="field"><span>余白 ${{ t: '上', b: '下', l: '左', r: '右' }[k]}（mm）</span><input id="psM${k}" type="number" min="3" max="40" value="${s.margin[k]}"></label>`).join('')}</div>`,
       buttons: [{ label: 'キャンセル' }, { label: 'OK', cls: 'primary', onClick: (bd) => {
         const h = Math.max(4, Math.min(12, +bd.querySelector('#psH').value || 7));
         const [w, hh] = bd.querySelector('#psP').value.split('x').map(Number);
-        a.edit('ページ設定', () => { s.staffMm = h; s.page = { w, h: hh }; });
+        const mg = Object.fromEntries(['t', 'b', 'l', 'r'].map(k => [k, Math.max(3, Math.min(40, +bd.querySelector('#psM' + k).value || s.margin[k]))]));
+        a.edit('ページ設定', () => { s.staffMm = h; s.page = { w, h: hh }; s.margin = mg; });
         a.view.resetZoom(); a.relayout();
       } }],
     });
@@ -628,6 +563,15 @@ export class Dialogs {
         ・<b>表情付き再生</b>：rit.・accel.・a tempo などの文字、スウィング、拍の強弱、人間らしい揺れ（「ツール → 再生の設定」）。ミキサー（音量・左右・ミュート・ソロ）、メトロノーム、外部 MIDI 音源での再生も。<br>
         ・<b>ページレイアウト</b>：「スコア → ページレイアウト」で段の間隔・1段の小節数・余白。小節メニューで「前の段へ / 次の段へ / 改ページ / 1段にまとめる」。<br>
         ・<b>音域チェック</b>：「ツール → 音域チェック」で、楽器の音域から外れた音を赤く表示します。</p>
+        <h3>Phase 4：Word のような画面・記号パレット</h3>
+        <p>・<b>ホーム画面</b>：起動すると最近の楽譜とテンプレートが並びます。左上の家のボタン、または「ファイル」タブでいつでも戻れます（「ファイル」では保存・書き出し・印刷も）。<br>
+        ・<b>リボン</b>：上のタブ（ホーム・記号・小節・レイアウト・再生・表示・ツール）を切り替えると、その下に操作が並びます。タブをダブルクリック（Ctrl+F1）でたたむと楽譜を広く使えます。<br>
+        ・<b>記号</b>：「記号」タブのボタンで一覧（ギャラリー）が開きます。全部の記号は右の<b>記号パレット</b>（F9）で、名前で検索もできます。アーティキュレーション・装飾記号・フェルマータ・ブレス・強弱・線（8va・ペダル・rit. - - -・グリッサンド・ヴィブラート …）・テキスト・テンポ・反復・アルペジオ・トレモロ・符頭・運指・弦番号・音部記号・調号・拍子・小節線・連桁など。<br>
+        ・<b>検索</b>（Ctrl+K）：「移調」「フェルマータ」「改ページ」のように、やりたいことや記号の名前で探して実行できます。<br>
+        ・<b>ページの並べ方</b>：下のバーの右か「表示」タブで、縦（Word と同じ）・横・見開き・1段スクロール。<br>
+        ・<b>MuseScore と同じ便利な操作</b>：R でくり返し、Shift+X で符尾の反転、{ } で小節の幅、Ctrl+G で小節へ移動、音程を重ねる（ツール）、声部の入れ替え、スラッシュで埋める、ループ再生と再生の速さ（再生タブ）、コードネームを鳴らす。<br>
+        ・<b>拍子の変更</b>：音符を新しい小節線で組み直します（Finale の「小節の再構成」）。はみ出す音はタイで次の小節へ。<br>
+        ・<b>書き出し</b>：MusicXML・MIDI・WAV に加えて、PNG・SVG の画像も。</p>
         <h3>PC（マウス）で使うとき</h3>
         <p>・<b>ドラッグ</b>で小節の範囲選択、<b>右クリック</b>でその場のメニュー（コピー・移調・拍子や調の変更など）、<b>ダブルクリック</b>でそこから入力。<br>
         ・<b>Ctrl+ホイール</b>で拡大縮小、<b>Ctrl+0</b> で画面に合わせる（大きな画面ではページを横に並べます）。<br>
@@ -663,12 +607,20 @@ export class Dialogs {
           <tr><td>開く／新規作成</td><td>${k('Ctrl')}+${k('O')} / ${k('Alt')}+${k('N')}</td><td>${k('Ctrl')}+${k('O')} / ${k('Ctrl')}+${k('N')}</td></tr>
           <tr><td>拡大／縮小／画面に合わせる</td><td>${k('Ctrl')}+${k('+')} ${k('-')} / ${k('Ctrl')}+${k('0')}</td><td>—</td></tr>
           <tr><td>この使い方</td><td>${k('F1')} / ${k('?')}</td><td>—</td></tr>
+          <tr><td>検索（操作・記号）</td><td>${k('Ctrl')}+${k('K')}</td><td>—</td></tr>
+          <tr><td>記号パレット</td><td>${k('F9')}</td><td>MuseScore と同じ</td></tr>
+          <tr><td>小節へ移動</td><td>${k('Ctrl')}+${k('G')}</td><td>—</td></tr>
+          <tr><td>くり返し（選択モード）</td><td>${k('R')}</td><td>MuseScore と同じ</td></tr>
+          <tr><td>符尾の向きを反転</td><td>${k('Shift')}+${k('X')}</td><td>MuseScore の X</td></tr>
+          <tr><td>小節の幅を狭める／広げる</td><td>${k('{')} ${k('}')}</td><td>MuseScore と同じ</td></tr>
+          <tr><td>歌詞の伸ばし線（メリスマ）</td><td>${k('_')}</td><td>MuseScore と同じ</td></tr>
+          <tr><td>リボンをたたむ</td><td>${k('Ctrl')}+${k('F1')}</td><td>Word と同じ</td></tr>
         </table>
         <p style="font-size:13px;color:var(--muted)">※ iPad では Ctrl の代わりに ⌘（Command）でも動きます。新規作成が Alt+N なのは、ブラウザでは Ctrl+N が「新しいウィンドウ」に取られてしまうためです。</p>
         <h3>Finale からの引っ越し</h3>
         <p>Finale で「ファイル → 書き出し → MusicXML」で保存し、KANADE の「ファイル → MusicXML を読み込む」で開きます（.musicxml / .xml / .mxl に対応）。</p>
         <h3>保存</h3>
-        <p>楽譜は自動でこの端末に保存されます（ファイル → 開く の「最近の楽譜」）。<br>
+        <p>楽譜は自動でこの端末に保存されます（ホーム画面の「最近使った楽譜」。右上に「保存済み」と出ます）。<br>
         PC では「ファイル → 保存」（Ctrl+S）で <b>.kanade ファイル</b>として好きな場所に保存できます。.kanade は KANADE の情報を全部そのまま残す形式で、iPad ⇄ PC の受け渡しにも使えます。ほかのソフトに渡すときは MusicXML に書き出してください。</p>
       </div>`,
       buttons: [{ label: '閉じる', cls: 'primary' }],

@@ -1,12 +1,14 @@
 // アプリ本体：状態（楽譜・カーソル・選択・入力設定）を持ち、操作を楽譜に反映して再描画する
-import { createScore, measureAttrs, INST, clefInfo, staffList } from './core/score.js';
+import { createScore, measureAttrs, INST, clefInfo, staffList, clefAt, measureRest, newId } from './core/score.js';
+import { rebar } from './core/rebar.js';
 import * as E from './core/edit.js';
 import * as K from './core/marks.js';
 import { History } from './core/history.js';
-import { TYPE_TICKS, dottedTicks, spellMidi, midiOf, diatonic, fromDiatonic, keyAlter, pitchName, STEP_JA, TPQ, TYPE_JA } from './core/music.js';
+import { TYPE_TICKS, dottedTicks, spellMidi, midiOf, diatonic, fromDiatonic, keyAlter, pitchName, STEP_JA, TPQ, TYPE_JA, CLEFS, keyNameJa, beatTicks, ticksToType } from './core/music.js';
 import { layoutScore } from './engrave/layout.js';
 import { ScoreView } from './ui/view.js';
-import { Palette } from './ui/palette.js';
+import { Ribbon } from './ui/ribbon.js';
+import { Home } from './ui/home.js';
 import { Piano } from './ui/piano.js';
 import { Dialogs } from './ui/dialogs.js';
 import { bindKeys } from './ui/keys.js';
@@ -35,9 +37,19 @@ export class App {
       grace: false, openSpan: null, verse: 0,
     };
     // 表示の設定：part = パート譜で表示するパート（null ならスコア）、transposed = 移調楽器を記譜音で表示
-    let tr = false;
-    try { tr = localStorage.getItem('kanade.transposed') === '1'; } catch (e) { /* 使えない環境 */ }
-    this.viewOpts = { part: null, transposed: tr, multiRest: true, rangeCheck: false };
+    let tr = false, arrange = 'vertical', theme = 'auto';
+    try {
+      tr = localStorage.getItem('kanade.transposed') === '1';
+      arrange = localStorage.getItem('kanade.arrange') || 'vertical';
+      theme = localStorage.getItem('kanade.theme') || 'auto';
+      if (localStorage.getItem('kanade.colorVoices') === '0') this.state.colorVoices = false;
+    } catch (e) { /* 使えない環境 */ }
+    // arrange = ページの並べ方：vertical（縦・Word と同じ）/ horizontal（横）/ spread（見開き）/ scroll（1段スクロール）
+    this.viewOpts = { part: null, transposed: tr, multiRest: true, rangeCheck: false, arrange };
+    this.theme = theme;
+    this.speed = 1;      // 再生の速さ（リボンの「再生」タブ）
+    this.loop = null;    // ループ再生の範囲 { m1, m2 }
+    this.transient = false; // まだ何も書いていない仮の楽譜（ホーム画面の後ろ）。編集すると保存されるようになる
     this.textEd = null; // 歌詞・コードネームの入力中
     this.history = new History();
     this.synth = new Synth();
@@ -51,11 +63,14 @@ export class App {
   }
 
   async init() {
+    this.applyTheme();
     this.view = new ScoreView(this, document.getElementById('scroller'), document.getElementById('pages'));
-    this.palette = new Palette(this, document.getElementById('palette'));
+    document.getElementById('pages').dataset.arrange = this.viewOpts.arrange;
+    this.home = new Home(this);
     this.piano = new Piano(this, document.getElementById('piano'));
     this.dialogs = new Dialogs(this);
     this.tools = new Tools(this);
+    this.ribbon = new Ribbon(this);
     bindKeys(this);
     this.bindTopbar();
     this.bindPointer();
@@ -73,16 +88,17 @@ export class App {
     this.player.onStop = () => { this.view.hideOverlay('play'); this.updateUI(); };
     document.body.classList.toggle('color-voices', this.state.colorVoices);
 
-    // 最後に開いていた楽譜を読み込む（なければ新規）
-    let opened = false;
+    // 起動：Word と同じく、まずホーム画面（オプションで「前回の楽譜をすぐ開く」も選べる）。
+    // 後ろには前回の楽譜を開いておく（なければ何も保存しない仮の楽譜）
+    let opened = false, startLast = false;
     try {
+      startLast = localStorage.getItem('kanade.startLast') === '1';
       const last = localStorage.getItem('kanade.last');
       if (last) { const doc = await storage.get(last); if (doc) { this.openDoc(doc); opened = true; } }
     } catch (e) { console.warn(e); }
-    if (!opened) {
-      this.newDoc(createScore({ insts: ['piano'], title: '無題', measures: 16 }));
-      setTimeout(() => this.dialogs.newScore(true), 300);
-    }
+    if (!opened) this.newDoc(createScore({ insts: ['piano'], title: '無題', measures: 16 }), { transient: true });
+    const launched = 'launchQueue' in window && new URLSearchParams(location.search).has('file');
+    if (!(startLast && opened) && !launched) this.home.show('launch');
     await document.fonts.load('20px Bravura').catch(() => {});
     this.view.resetZoom();
     this.relayout();
@@ -97,6 +113,7 @@ export class App {
     this.score = score;
     this.docId = opts.id || storage.newId();
     this.fileHandle = opts.handle || null; this.fileName = opts.handle ? opts.handle.name : null; this.fileDirty = false;
+    this.transient = !!opts.transient;
     this.history.clear();
     this.resetDocState();
     this.save();
@@ -110,6 +127,7 @@ export class App {
     if (this.view) this.updateViewButton();
   }
   openDoc(doc) {
+    this.transient = false;
     this.score = doc.score;
     this.docId = doc.id;
     this.fileHandle = doc.handle || null; this.fileName = doc.fileName || null; this.fileDirty = !!doc.fileDirty;
@@ -118,16 +136,31 @@ export class App {
     try { localStorage.setItem('kanade.last', doc.id); } catch (e) { /* プライベートモード */ }
   }
   async save() {
-    if (!this.score) return;
+    if (!this.score || this.transient) return;
     clearTimeout(this.saveTimer);
-    const doc = { id: this.docId, title: this.score.meta.title || '無題', updated: Date.now(), score: this.score, handle: this.fileHandle, fileName: this.fileName, fileDirty: this.fileDirty };
+    const old = await storage.get(this.docId).catch(() => null);
+    const doc = { id: this.docId, title: this.score.meta.title || '無題', updated: Date.now(), score: this.score, handle: this.fileHandle, fileName: this.fileName, fileDirty: this.fileDirty, pinned: !!old?.pinned, summary: `${this.score.parts.length}パート・${this.score.measures.length}小節` };
     try {
       await storage.put(doc);
       localStorage.setItem('kanade.last', this.docId);
+      this.savedAt = Date.now();
+      this.updateSaveState();
     } catch (e) { console.warn('保存失敗', e); }
   }
+  // 上のバーの「保存しました」（Word の自動保存の表示）
+  updateSaveState() {
+    const el = document.getElementById('saveState');
+    if (!el) return;
+    if (this.transient) { el.textContent = ''; return; }
+    el.textContent = this.fileName && this.fileDirty ? '● 未保存' : this.saveTimer && this.pendingSave ? '保存中…' : '保存済み';
+    el.classList.toggle('dirty', !!(this.fileName && this.fileDirty));
+    el.title = this.fileName ? `ファイル：${this.fileName}${this.fileDirty ? '（Ctrl+S でファイルに保存）' : ''}` : 'この端末に自動で保存しています';
+  }
   scheduleSave() {
-    clearTimeout(this.saveTimer); this.saveTimer = setTimeout(() => this.save(), 700);
+    this.transient = false;
+    this.pendingSave = true;
+    clearTimeout(this.saveTimer); this.saveTimer = setTimeout(() => { this.pendingSave = false; this.save(); }, 700);
+    this.updateSaveState();
     // 端末内には自動保存されるが、PC のファイルにはまだ書いていない印（タイトルの ●）
     if (this.fileHandle && !this.fileDirty) { this.fileDirty = true; this.updateTitle(); }
   }
@@ -173,7 +206,7 @@ export class App {
     const t0 = performance.now();
     const vo = this.viewOpts;
     if (vo.part != null && !this.score.parts[vo.part]) vo.part = null;
-    this.L = layoutScore(this.score, { measureText: this.measureText, parts: vo.part != null ? [vo.part] : null, transposed: vo.transposed, multiRest: vo.multiRest, rangeCheck: vo.rangeCheck });
+    this.L = layoutScore(this.score, { measureText: this.measureText, parts: vo.part != null ? [vo.part] : null, transposed: vo.transposed, multiRest: vo.multiRest, rangeCheck: vo.rangeCheck, continuous: vo.arrange === 'scroll' });
     this.view.render(this.L);
     this.layoutMs = performance.now() - t0;
     this.refreshOverlays();
@@ -206,7 +239,8 @@ export class App {
 
   updateUI() {
     const st = this.state;
-    this.palette.update();
+    this.ribbon?.update();
+    document.querySelectorAll('#statusbar [data-arr]').forEach(b => b.classList.toggle('on', b.dataset.arr === this.viewOpts.arrange));
     document.getElementById('btnUndo').disabled = !this.history.canUndo;
     document.getElementById('btnRedo').disabled = !this.history.canRedo;
     document.body.classList.toggle('mode-input', st.mode === 'input');
@@ -215,7 +249,8 @@ export class App {
     document.getElementById('zoomLabel').textContent = Math.round(this.view.zoom * 100) + '%';
     const A = this.L ? this.L.attrs : measureAttrs(this.score);
     const m = this.focusMeasure();
-    document.getElementById('tempoLabel').textContent = '= ' + (A[m] ? A[m].bpm : 100);
+    const tpm = (() => { for (let i = m; i >= 0; i--) if (this.score.measures[i]?.tempo) return this.score.measures[i].tempo; return null; })();
+    document.getElementById('tempoLabel').textContent = '= ' + (tpm ? tpm.bpm : A[m] ? A[m].bpm : 100) + (this.speed !== 1 ? ` (${Math.round(this.speed * 100)}%)` : '');
     document.getElementById('btnPlay').classList.toggle('on', this.player.playing);
     // ステータス
     const parts = [];
@@ -682,9 +717,10 @@ export class App {
   }
 
   // 線（スラー・松葉・8va・ペダル・トリル）。選んだ音符の範囲に付ける。入力モードでは「入れながら伸ばす」
-  addSpan(k) {
+  addSpan(k, text = null) {
     const st = this.state;
     const name = K.SPANS[k].ja;
+    if (K.SPANS[k].custom && text == null) return this.dialogs.ask('文字＋線', '線の頭に書く文字（例：poco rit. / 8va bassa / sim.）', '', (v) => v != null && this.addSpan(k, v));
     if (st.mode === 'input') return this.toggleOpenSpan(k);
     const s = st.sel;
     if (!s || s.kind === 'mark') return this.toast(`${name}を付ける音符を選んでください（Shift+クリックで範囲）`);
@@ -708,7 +744,7 @@ export class App {
       if (!pairs.length) return this.toast('範囲に音符がありません');
     }
     let made = null;
-    this.edit(name, () => { for (const x of pairs) { const idx = K.addSpan(this.score, x.p, x.s, x.v, x.a, x.b, k); made = { p: x.p, s: x.s, m: Math.min(x.a.m, x.b.m), idx }; } });
+    this.edit(name, () => { for (const x of pairs) { const idx = K.addSpan(this.score, x.p, x.s, x.v, x.a, x.b, k); if (text) this.score.parts[x.p].staves[x.s].measures[Math.min(x.a.m, x.b.m)].spans[idx].text = text; made = { p: x.p, s: x.s, m: Math.min(x.a.m, x.b.m), idx }; } });
     if (made && pairs.length === 1) this.selectMark(`s:${made.p}:${made.s}:${made.m}:${made.idx}`);
     this.toast(`${name}：←→ で終わり、Shift+←→ で始まりを動かせます`, 2600);
   }
@@ -761,12 +797,13 @@ export class App {
   }
   markName(ref) {
     if (ref.type === 'lyr') { const f = E.findEvent(this.score, ref.id); return `歌詞「${f?.ev.lyr?.[ref.verse]?.t || ''}」（${ref.verse + 1}番）`; }
-    if (ref.type === 'meas') return { ending: 'カッコ（1番・2番）', segno: 'セーニョ', coda: 'コーダ', fine: 'Fine', toCoda: 'To Coda', jump: K.JUMPS[this.score.measures[ref.m]?.jump]?.text || 'D.C./D.S.' }[ref.what] + `（第${ref.m + 1}小節）`;
+    if (ref.type === 'meas') return { ending: 'カッコ（1番・2番）', segno: 'セーニョ', coda: 'コーダ', fine: 'Fine', toCoda: 'To Coda', jump: K.JUMPS[this.score.measures[ref.m]?.jump]?.text || 'D.C./D.S.', reh: '練習番号', tempo: 'テンポ' }[ref.what] + `（第${ref.m + 1}小節）`;
+    if (ref.type === 'stext') return `システムテキスト「${this.score.measures[ref.m]?.stext?.[ref.idx]?.text || ''}」`;
     const sm = this.score.parts[ref.p]?.staves[ref.s]?.measures[ref.m];
     if (ref.type === 'span') { const sp = sm?.spans?.[ref.idx]; return sp ? K.SPANS[sp.k].ja.replace(/（.*/, '') + `（第${ref.m + 1}〜${ref.m + sp.dm + 1}小節）` : '線'; }
     const d = sm?.dirs?.[ref.idx];
     if (!d) return '記号';
-    return d.k === 'dyn' ? `強弱記号 ${d.v}` : d.k === 'chord' ? `コードネーム ${d.text}` : `文字「${d.text}」`;
+    return d.k === 'dyn' ? `強弱記号 ${d.v}` : d.k === 'chord' ? `コードネーム ${d.text}` : d.k === 'fret' ? `フレット図 ${d.text}` : `文字「${d.text}」`;
   }
   deleteMark() {
     const st = this.state;
@@ -777,7 +814,8 @@ export class App {
       if (r.type === 'dir') return K.removeDir(this.score, r.p, r.s, r.m, r.idx) || false;
       if (r.type === 'span') return K.removeSpan(this.score, r.p, r.s, r.m, r.idx) || false;
       if (r.type === 'lyr') return K.setLyric(this.score, r.id, r.verse, '');
-      if (r.type === 'meas') { delete this.score.measures[r.m][r.what]; return true; }
+      if (r.type === 'meas') { if (r.what === 'tempo' && r.m === 0) return false; delete this.score.measures[r.m][r.what]; return true; }
+      if (r.type === 'stext') { const ms = this.score.measures[r.m]; ms.stext.splice(r.idx, 1); if (!ms.stext.length) delete ms.stext; return true; }
       return false;
     });
     st.sel = null;
@@ -789,7 +827,10 @@ export class App {
     const r = st.sel?.ref;
     if (!r) return;
     if (r.type === 'lyr') return this.startLyrics(r.id, r.verse);
+    if (r.type === 'meas' && r.what === 'tempo') { this.state.sel = { kind: 'range', m1: r.m, m2: r.m, r1: 0, r2: 0, a: r.m, ra: 0 }; return this.dialogs.tempo(); }
+    if (r.type === 'meas' && r.what === 'reh') { const ms = this.score.measures[r.m]; return this.dialogs.ask('練習番号', '空にすると自動（A, B, C …）', ms.reh?.text || '', (v) => this.edit('練習番号', () => { ms.reh = v ? { text: v } : {}; })); }
     if (r.type === 'meas') return this.dialogs.repeats(r.m);
+    if (r.type === 'stext') { const d = this.score.measures[r.m].stext[r.idx]; return this.dialogs.ask('システムテキスト', '', d.text, (v) => v && this.edit('システムテキスト', () => { d.text = v; })); }
     if (r.type === 'span') return this.toast('線は ←→ / Shift+←→ で長さを変えられます');
     const d = this.score.parts[r.p]?.staves[r.s]?.measures[r.m]?.dirs?.[r.idx];
     if (!d) return;
@@ -798,6 +839,7 @@ export class App {
       return at && this.startChords(at.ev.id);
     }
     if (d.k === 'dyn') return this.dialogs.marksMenu('expr', null);
+    if (d.k === 'fret') return this.dialogs.ask('フレット図のコード', 'C / Am / G7 など', d.text, (v) => v && this.edit('フレット図', () => { d.text = v; }));
     this.dialogs.textExpr(d, (nd) => this.edit('文字の表情記号', () => { Object.assign(d, nd); }));
   }
   nudgeMark(dir, which) {
@@ -848,7 +890,7 @@ export class App {
     let value, label, y, x, align;
     if (te.kind === 'lyr') {
       const ly = f.ev.lyr?.[st.verse];
-      value = ly ? ly.t + (ly.h ? '-' : '') : '';
+      value = ly ? ly.t + (ly.h ? '-' : '') + (ly.ext ? '_' : '') : '';
       // その段にもう歌詞があれば同じ行に、なければ譜表の下に
       const mk = this.L.marks.find(m => m.ref.type === 'lyr' && m.k === g.k && m.r === g.r && m.ref.verse === st.verse);
       y = mk ? mk.oy + mk.y1 - 0.6 : g.oy + Math.max(g.bot, 4) + 2.8 + st.verse * 2.8;
@@ -871,7 +913,8 @@ export class App {
     if (!te) return;
     const k = e.key;
     e.stopPropagation();
-    if (k === ' ' || (k === 'Tab' && !e.shiftKey) || k === '_') { e.preventDefault(); this.commitEditor(inp.value, false); return this.editorMove(1); }
+    if (k === '_' && te.kind === 'lyr') { e.preventDefault(); this.commitEditor(inp.value, false, true); return this.editorMove(1); }
+    if (k === ' ' || (k === 'Tab' && !e.shiftKey)) { e.preventDefault(); this.commitEditor(inp.value, false); return this.editorMove(1); }
     if (k === '-' && te.kind === 'lyr') { e.preventDefault(); this.commitEditor(inp.value, true); return this.editorMove(1); }
     if (k === 'Tab' && e.shiftKey) { e.preventDefault(); this.commitEditor(inp.value, false); return this.editorMove(-1); }
     if (k === 'Backspace' && inp.value === '') { e.preventDefault(); return this.editorMove(-1); }
@@ -892,7 +935,7 @@ export class App {
     this.commitEditor(v, false);
     this.editorMove(1);
   }
-  commitEditor(raw, hyphen) {
+  commitEditor(raw, hyphen, ext = false) {
     const te = this.textEd;
     if (!te) return;
     const f = E.findEvent(this.score, te.id);
@@ -900,9 +943,10 @@ export class App {
     let text = String(raw || '').trim();
     if (te.kind === 'lyr') {
       if (text.endsWith('-')) { hyphen = true; text = text.replace(/-+$/, ''); }
+      if (text.endsWith('_')) { ext = true; text = text.replace(/_+$/, ''); }
       const cur = f.ev.lyr?.[this.state.verse];
-      if ((cur?.t || '') === text && (!text || !!cur?.h === !!hyphen)) return;
-      this.edit('歌詞', () => K.setLyric(this.score, te.id, this.state.verse, text, hyphen));
+      if ((cur?.t || '') === text && (!text || (!!cur?.h === !!hyphen && !!cur?.ext === !!ext))) return;
+      this.edit('歌詞', () => { K.setLyric(this.score, te.id, this.state.verse, text, hyphen); const ly = E.findEvent(this.score, te.id)?.ev.lyr?.[this.state.verse]; if (ly && ext) ly.ext = true; });
     } else {
       const sm = this.score.parts[f.p].staves[f.s].measures[f.m];
       const idx = (sm.dirs || []).findIndex(d => d.k === 'chord' && d.t === f.t);
@@ -946,6 +990,8 @@ export class App {
   }
   updateViewButton() {
     const vo = this.viewOpts;
+    const rl = document.querySelector('#rbPanel [data-cmd="partV"] .rl');
+    if (rl) rl.firstChild.textContent = vo.part != null ? (this.score.parts[vo.part]?.abbr || 'パート') : 'スコア／パート';
     const el = document.getElementById('viewLabel');
     if (!el) return;
     el.textContent = vo.part != null ? (this.score.parts[vo.part]?.abbr || 'パート') : 'スコア';
@@ -1039,12 +1085,12 @@ export class App {
     if (this.tools.rec.active) return this.tools.stopRec();
     if (this.player.playing) { this.player.stop(); this.updateUI(); return; }
     this.synth.ensure();
-    const from = this.playFrom ?? this.focusMeasure();
+    const from = this.loop ? this.loop.m1 : this.playFrom ?? this.focusMeasure();
     this.playFrom = null;
     this.followPlay = true;
     document.getElementById('btnPlay').classList.add('on');
     const pb = this.score.settings.playback || {};
-    await this.player.start(this.score, from, { click: !!pb.click, countIn: pb.click ? pb.countIn || 0 : 0 });
+    await this.player.start(this.score, from, { click: !!pb.click, countIn: pb.click ? pb.countIn || 0 : 0, loop: this.loop || null, tempoScale: this.speed || 1 });
     this.updateUI();
   }
   rewind() {
@@ -1116,9 +1162,10 @@ export class App {
         const known = await storage.findByHandle(handle);
         this.newDoc(score, { id: known?.id, handle });
       } else this.newDoc(score);
+      if (this.home.visible) { this.home.canBack = true; this.home.hide(); }
       this.view.resetZoom();
       this.relayout();
-      this.view.scroller.scrollTo({ top: 0 });
+      this.view.scroller.scrollTo({ top: 0, left: 0 });
       this.toast(`「${score.meta.title || file.name}」を開きました（${score.parts.length}パート・${score.measures.length}小節）`, 2600);
     } catch (e) {
       console.error(e);
@@ -1128,8 +1175,64 @@ export class App {
   print() {
     this.state.sel = null;
     this.refreshOverlays();
-    setTimeout(() => window.print(), 50);
+    // 1段スクロール表示のときは、ページの形に直して印刷する
+    const arr = this.viewOpts.arrange;
+    if (arr === 'scroll') { this.viewOpts.arrange = 'vertical'; this.relayout(); }
+    setTimeout(() => {
+      window.print();
+      if (arr === 'scroll') { this.viewOpts.arrange = arr; this.relayout(); }
+    }, 80);
   }
+  // ページを画像（PNG / SVG）に書き出す。PNG は 1ページずつ（複数ページなら番号つき）
+  async exportImage(kind = 'png') {
+    const L = layoutScore(this.score, { measureText: this.measureText, parts: this.viewOpts.part != null ? [this.viewOpts.part] : null, transposed: this.viewOpts.transposed });
+    const css = `.paper{fill:#fff}text{stroke:none}.g{font-family:Bravura;font-size:4px}.gs{font-size:3px}.gg{font-size:2.48px}.cue{font-size:2.88px}.t{font-family:"Times New Roman","Hiragino Mincho ProN","Yu Mincho",serif}.title{font-weight:600}.mnum,.tempo-t{font-style:italic}.tempo-t{font-weight:600}polygon.beam,path.tie,path.slur{stroke:none}.hair,.ending,.tline,.fretgrid,.arpb,.strnum{fill:none}.tabn .tabbg{fill:#fff}`;
+    const base = this.fileBaseName();
+    let fontData = '';
+    try { const buf = await (await fetch('fonts/Bravura.woff2')).arrayBuffer(); let bin = ''; const u8 = new Uint8Array(buf); for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode(...u8.subarray(i, i + 0x8000)); fontData = `@font-face{font-family:Bravura;src:url(data:font/woff2;base64,${btoa(bin)}) format("woff2")}`; } catch (e) { console.warn(e); }
+    const svgOf = (pg, w, h) => `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${pg.w} ${pg.h}" fill="#111" stroke="#111"><style>${fontData}${css}</style>${pg.svg}</svg>`;
+    const mmW = this.score.settings.page.w;
+    try {
+      for (let i = 0; i < L.pages.length; i++) {
+        const pg = L.pages[i];
+        const name = base + (L.pages.length > 1 ? `-${i + 1}` : '');
+        if (kind === 'svg') {
+          const svg = svgOf(pg, mmW + 'mm', (mmW * pg.h / pg.w) + 'mm');
+          await saveFile(name + '.svg', new Blob([svg], { type: 'image/svg+xml' }), 'svg');
+          continue;
+        }
+        // 300 dpi 相当の PNG
+        const W = Math.round(mmW / 25.4 * 300), H = Math.round(W * pg.h / pg.w);
+        const url = URL.createObjectURL(new Blob([svgOf(pg, W, H)], { type: 'image/svg+xml' }));
+        const img = new Image();
+        await new Promise((ok, ng) => { img.onload = ok; img.onerror = ng; img.src = url; });
+        await new Promise(r => setTimeout(r, 60)); // フォントを読み込む時間
+        const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+        const cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, W, H); cx.drawImage(img, 0, 0, W, H);
+        URL.revokeObjectURL(url);
+        const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+        await saveFile(name + '.png', blob, 'png');
+      }
+      this.toast(`${L.pages.length}ページを ${kind.toUpperCase()} に書き出しました`);
+    } catch (e) { console.error(e); this.toast('書き出せませんでした：' + e.message, 3500); }
+  }
+  // ページの並べ方
+  setArrange(mode) {
+    this.viewOpts.arrange = mode;
+    try { localStorage.setItem('kanade.arrange', mode); } catch (e) { /* 使えない環境 */ }
+    document.getElementById('pages').dataset.arrange = mode;
+    this.relayout();
+    this.view.resetZoom(); this.view.rescale(); this.afterZoom();
+    this.view.scroller.scrollTo({ top: 0, left: 0 });
+    this.toast({ vertical: 'ページを縦に並べています', horizontal: 'ページを横に並べています', spread: '見開き（2ページずつ）', scroll: '1段スクロール：横にスクロールして見ます' }[mode]);
+  }
+  setTheme(v) {
+    this.theme = v;
+    try { localStorage.setItem('kanade.theme', v); } catch (e) { /* 使えない環境 */ }
+    this.applyTheme();
+  }
+  applyTheme() { if (this.theme === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = this.theme; }
+  insertMeasureBefore() { const m = this.targetMeasure(); this.edit('小節の挿入', () => E.appendMeasures(this.score, 1, m)); this.toast(`第${m + 1}小節の前に1小節挿入しました`); }
 
   // ───────── 画面のボタン ─────────
   bindTopbar() {
@@ -1141,11 +1244,9 @@ export class App {
     $('btnZoomIn').onclick = () => this.view.setZoom(this.view.zoom * 1.15);
     $('btnZoomOut').onclick = () => this.view.setZoom(this.view.zoom / 1.15);
     $('zoomLabel').onclick = () => this.zoomToFit();
-    $('btnFile').onclick = (e) => this.dialogs.fileMenu(e.currentTarget);
-    $('btnMeasure').onclick = (e) => this.dialogs.measureMenu(e.currentTarget);
-    $('btnScore').onclick = (e) => this.dialogs.scoreMenu(e.currentTarget);
-    $('btnView').onclick = (e) => this.dialogs.viewMenu(e.currentTarget);
-    $('btnTools').onclick = (e) => this.tools.menu(e.currentTarget);
+    $('btnHome').onclick = () => this.home.show('home');
+    $('btnSearch').onclick = () => this.ribbon.openSearch();
+    document.querySelectorAll('#statusbar [data-arr]').forEach(b => { b.onclick = () => this.setArrange(b.dataset.arr); });
     $('btnRec').onclick = () => (this.tools.rec.active ? this.tools.stopRec() : this.tools.hyperscribe());
     $('btnTempo').onclick = () => this.dialogs.tempo();
     $('docTitle').onclick = () => this.dialogs.scoreInfo();
@@ -1179,7 +1280,7 @@ export class App {
     });
     // インストールしたアプリで .kanade / .musicxml をダブルクリックしたとき（manifest の file_handlers）
     if ('launchQueue' in window) {
-      window.launchQueue.setConsumer(async (p) => { const h = p.files && p.files[0]; if (h) this.openFile(await h.getFile(), h); });
+      window.launchQueue.setConsumer(async (p) => { const h = p.files && p.files[0]; if (h) { await this.openFile(await h.getFile(), h); } });
     }
     // Chrome / Edge の「アプリとしてインストール」をファイルメニューから出せるように取っておく
     window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); this.installPrompt = e; });
@@ -1229,6 +1330,19 @@ export class App {
         }
       }
       if (drag.lockScroll || e.pointerType === 'mouse') { try { pagesEl.setPointerCapture(e.pointerId); } catch (err) { /* 未対応 */ } }
+      // iPad：長押しで右クリックと同じメニュー（選択モードのとき。指でもペンでも）
+      clearTimeout(this.lpT);
+      if (e.pointerType !== 'mouse' && st.mode === 'select' && h) {
+        const d0 = drag, cx = e.clientX, cy = e.clientY;
+        this.lpT = setTimeout(() => {
+          if (drag !== d0 || d0.moved) return;
+          d0.longPressed = true;
+          const mk = this.view.hitMark(pt);
+          const near = this.view.nearestEvent(h);
+          if (mk && !(near && near.d < 0.6)) this.markMenu(mk, { clientX: cx, clientY: cy });
+          else this.contextMenu(h, { clientX: cx, clientY: cy });
+        }, 550);
+      }
     });
 
     pagesEl.addEventListener('pointermove', (e) => {
@@ -1242,7 +1356,7 @@ export class App {
         else this.hoverAt(h, pt);
         return;
       }
-      if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 8) drag.moved = true;
+      if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 8) { drag.moved = true; clearTimeout(this.lpT); }
       const h = this.view.hit(this.view.locate(e.clientX, e.clientY));
       if (st.mode === 'input' && (drag.type !== 'touch' || !drag.moved)) this.updateGhost(h);
       if (drag.range && drag.moved && h) {
@@ -1273,6 +1387,8 @@ export class App {
     const finish = (e, cancel) => {
       if (!drag || drag.id !== e.pointerId) return;
       const d = drag; drag = null;
+      clearTimeout(this.lpT);
+      if (d.longPressed) return;
       const st = this.state;
       if (d.pitchDrag) { if (d.pitchDrag.applied) this.scheduleSave(); return; }
       if (d.rangeDone) { this.lastRangeTap = 0; return; }
@@ -1375,7 +1491,8 @@ export class App {
     // 記号（Phase 2）
     items.push('-');
     if (isNote || sel.kind === 'range') items.push(
-      { label: 'アーティキュレーション…', kbd: '▸', run: () => this.dialogs.marksMenu('art', pt) },
+      { label: 'アーティキュレーション…', kbd: '▸', run: () => this.ribbon.openGallery('artic', pt) },
+      { label: '装飾記号・トリル…', kbd: '▸', run: () => this.ribbon.openGallery('orn', pt) },
       { label: '強弱・表情記号…', kbd: 'X', run: () => this.dialogs.marksMenu('expr', pt) },
       { label: sel.to || sel.kind === 'range' ? 'スラー（選んだ範囲）' : 'スラー（次の音符まで）', kbd: 'S', run: () => this.addSpan('slur') },
       { label: 'クレッシェンド ／ デクレッシェンド…', kbd: '< >', run: () => this.dialogs.marksMenu('lines', pt) },
@@ -1385,6 +1502,10 @@ export class App {
     if (f?.ev.grace) items.push({ label: '装飾音符を消す', run: () => this.edit('装飾音符の削除', () => { delete E.findEvent(this.score, f.ev.id).ev.grace; }) });
     if (f?.ev.art) items.push({ label: 'アーティキュレーションを全部外す', run: () => this.edit('アーティキュレーション', () => K.clearArtics(this.score, this.selIds())) });
     items.push({ label: '反復記号・カッコ…', run: () => this.dialogs.repeats() });
+    // Phase 4
+    if (isNote) items.push({ label: '符尾の向きを反転', kbd: 'Shift+X', run: () => this.flipStem() }, { label: '音程を重ねる…', kbd: '▸', run: () => this.dialogs.menu(pt, [{ head: '音程を重ねる' }, ...[3, 4, 5, 6, 8].map(n => ({ label: `上に ${n === 8 ? 'オクターブ' : n + '度'}`, run: () => this.addInterval(n, 1) })), ...[3, 6, 8].map(n => ({ label: `下に ${n === 8 ? 'オクターブ' : n + '度'}`, run: () => this.addInterval(n, -1) }))]) });
+    if (f || sel.kind === 'range') items.push({ label: 'くり返し（すぐ後ろにもう一度）', kbd: 'R', run: () => this.repeatSelection() });
+    items.push({ label: '記号パレットを開く', kbd: 'F9', run: () => this.ribbon.togglePanel(true) });
     // Phase 3：ドラム・TAB・一括編集
     const fst = f && this.score.parts[f.p].staves[f.s];
     if (isNote && fst?.clef === 'percussion') items.push({ label: 'ドラムの種類…', kbd: '▸', run: () => this.tools.drumMenu(pt) });
@@ -1471,7 +1592,270 @@ export class App {
     this.refreshOverlays(); this.updateUI();
   }
 
+  // ───────── Phase 4：記号パレットから付けるもの・MuseScore / Finale の便利な編集 ─────────
+  // 和音の中の1音だけを選んでいるとき、その音の番号（それ以外は null = 全部の音）
+  selNoteIndex() { const s = this.state.sel; return this.state.mode === 'select' && s?.kind === 'event' && !s.to ? s.noteIndex ?? null : null; }
+  // 音符そのものの設定（アルペジオ・トレモロ・小さい音符・符尾・連桁・スラッシュ）。同じものをもう一度で外す
+  setEvProp(prop, value, label) {
+    const ids = this.selIds();
+    if (!ids.length) return this.toast('先に音符を選ぶか入力してください');
+    let on = null;
+    this.edit(label, () => { on = K.setEventProp(this.score, ids, prop, value); if (on === null) return false; });
+    if (on === null) return this.toast('休符には付けられません');
+    this.toast(on ? label : label + '：外しました');
+  }
+  // 1つ1つの音の設定（符頭の形・運指・括弧）
+  setNoteProp(prop, value, label) {
+    const ids = this.selIds();
+    if (!ids.length) return this.toast('先に音符を選ぶか入力してください');
+    let on = null;
+    this.edit(label, () => { on = K.setNoteProp(this.score, ids, prop, value, this.selNoteIndex()); if (on === null) return false; });
+    if (on === null) return this.toast('休符には付けられません');
+    this.toast(on ? label : label + '：元に戻しました');
+  }
+  // 弦番号 ①〜⑥（TAB の弦の指定と同じ値。五線にも丸数字で出す）
+  setStringNum(n) {
+    const ids = this.selIds();
+    if (!ids.length) return this.toast('先に音符を選ぶか入力してください');
+    const ni = this.selNoteIndex();
+    this.edit('弦番号', () => {
+      let any = false;
+      for (const id of ids) {
+        const ev = E.findEvent(this.score, id)?.ev;
+        if (!ev || ev.rest) continue;
+        ev.notes.forEach((x, i) => {
+          if (ni != null && ni !== i) return;
+          any = true;
+          if (x.strMark && x.str === n) { delete x.strMark; delete x.str; } else { x.str = n; x.strMark = true; }
+        });
+      }
+      if (!any) return false;
+    });
+  }
+  // 小節線・反復の線を付ける小節（範囲なら最後の小節）
+  barTarget() { const s = this.state.sel; return s?.kind === 'range' ? s.m2 : this.focusMeasure(); }
+  setBarline(type) {
+    const s = this.state.sel;
+    const m = this.barTarget();
+    const m1 = s?.kind === 'range' ? s.m1 : m;
+    this.edit('小節線', () => {
+      const ms = this.score.measures;
+      if (type === 'repeatStart') { if (ms[m1].repeatStart) delete ms[m1].repeatStart; else ms[m1].repeatStart = true; return; }
+      if (type === 'repeatEnd') { if (ms[m].repeatEnd) delete ms[m].repeatEnd; else ms[m].repeatEnd = { times: 2 }; return; }
+      if (type === 'repeatBoth') { ms[m1].repeatStart = true; ms[m].repeatEnd = { times: 2 }; return; }
+      if (!type || type === 'normal' || ms[m].barline === type) delete ms[m].barline; else ms[m].barline = type;
+    });
+    this.toast(type === 'normal' ? '普通の小節線にしました' : (K.BARLINES[type]?.ja || { repeatStart: '反復の始まり', repeatEnd: '反復の終わり', repeatBoth: '反復（|: 〜 :|）' }[type] || '小節線') + `（第${m + 1}小節）`);
+  }
+  // 音部記号・調号・拍子を、選んでいる小節（入力モードならカーソルの小節）から変える
+  insertClef(clef) {
+    const loc = this.state.mode === 'input' ? this.state.caret : this.selLoc();
+    if (!loc) return this.toast('音部記号を変える譜表の小節を選んでください');
+    const s = this.state.sel;
+    const rows = s?.kind === 'range' ? this.L.rows.slice(s.r1, s.r2 + 1).filter(r => r.kind !== 'tab') : [{ p: loc.p, s: loc.s }];
+    this.edit('音部記号', () => { for (const r of rows) E.setClef(this.score, r.p, r.s, loc.m, clef); });
+    this.setLastPitchForStaff();
+    this.toast(`${CLEFS[clef]?.ja || '音部記号'}（第${loc.m + 1}小節から）`);
+  }
+  insertKey(fifths) {
+    const m = this.targetMeasure();
+    this.edit('調号の変更', () => E.setKey(this.score, m, fifths));
+    this.toast(`調号：${keyNameJa(fifths)}（第${m + 1}小節から）`);
+  }
+  // 拍子の変更：音符は新しい小節線で組み直す（rebar = false なら今までどおり切り捨て）
+  insertTime(time, rebarNotes = true) {
+    const m = this.targetMeasure();
+    let r = null;
+    this.edit('拍子の変更', () => { if (rebarNotes) r = rebar(this.score, m, time); else E.setTime(this.score, m, time); });
+    this.state.sel = null;
+    this.state.caret = { ...this.state.caret, m: Math.min(this.state.caret.m, this.score.measures.length - 1), t: 0 };
+    this.refreshOverlays(); this.updateUI();
+    this.toast(`拍子：${time.symbol === 'common' ? 'C' : time.symbol === 'cut' ? '¢' : time.beats + '/' + time.beatType}（第${m + 1}小節から${r ? `・${r.count}小節に組み直しました` : ''}）`, 2600);
+  }
+  // 練習番号（自動で A, B, C …）。同じ小節でもう一度押すと外す
+  toggleRehearsal(text = null) {
+    const m = this.targetMeasure();
+    this.edit('練習番号', () => { const ms = this.score.measures[m]; if (ms.reh && !text) delete ms.reh; else ms.reh = text ? { text } : {}; });
+    this.toast(this.score.measures[m].reh ? `練習番号を付けました（第${m + 1}小節）` : '練習番号を外しました');
+  }
+  // システムテキスト（全パートに出る文字。パート譜にも出る）
+  addSystemText(text) {
+    const a = this.markAnchor();
+    if (!a) return this.toast('文字を付ける小節か音符を選んでください');
+    if (!text) return;
+    this.edit('システムテキスト', () => { const ms = this.score.measures[a.m]; (ms.stext || (ms.stext = [])).push({ t: a.t, text }); });
+  }
+  // ギターのフレット図（その位置のコードネームか、入力したコード）
+  addFret(name) {
+    const a = this.markAnchor();
+    if (!a) return this.toast('フレット図を付ける音符を選んでください');
+    const sm = this.score.parts[a.p].staves[a.s].measures[a.m];
+    const chord = name || (sm.dirs || []).find(d => d.k === 'chord' && d.t === a.t)?.text;
+    if (!chord) return this.dialogs.ask('フレット図のコード', 'C / Am / G7 / F#m など', '', (v) => v && this.addFret(v));
+    if (!K.fretShape(chord)) this.toast(`「${chord}」の押さえ方は登録がないので、名前だけ表示します`, 2600);
+    this.edit('フレット図', () => K.addDir(this.score, a.p, a.s, a.m, { t: a.t, k: 'fret', text: chord }));
+  }
+  // テンポ記号（Allegro など）。bpm は拍の単位（unit）あたり
+  setTempoMark(text, bpm, unit = 'quarter') {
+    const m = this.targetMeasure();
+    this.edit('テンポ', () => { this.score.measures[m].tempo = { bpm, ...(text ? { text } : {}), ...(unit !== 'quarter' ? { unit } : {}) }; });
+    this.toast(`テンポ：${text ? text + ' ' : ''}${bpm}（第${m + 1}小節から）`);
+  }
+  // 小節の繰り返し記号（直前の小節をもう一度）
+  toggleMeasureRepeat() {
+    const rg = this.rangeOrMeasure();
+    if (!rg) return this.toast('小節を選んでください');
+    const A = measureAttrs(this.score);
+    let on = null;
+    this.edit('小節の繰り返し', () => {
+      for (const [p, s] of rg.staves) for (let m = Math.max(1, rg.m1); m <= rg.m2; m++) {
+        const sm = this.score.parts[p].staves[s].measures[m];
+        if (on === null) on = !sm.mrep;
+        if (on) { sm.mrep = 1; sm.voices = [[measureRest(A[m].len)]]; } else delete sm.mrep;
+      }
+      if (on === null) return false;
+    });
+    if (on === null) this.toast('1小節目には付けられません');
+  }
+  // スラッシュで埋める（コード譜のリズム譜。拍ごとに斜線。音は鳴らない）
+  fillSlashes() {
+    const rg = this.rangeOrMeasure();
+    if (!rg) return this.toast('小節を選んでください');
+    this.edit('スラッシュで埋める', () => {
+      const A = measureAttrs(this.score);
+      for (const [p, s] of rg.staves) for (let m = rg.m1; m <= rg.m2; m++) {
+        const a = A[m], bt = beatTicks(a.time);
+        const tt = ticksToType(bt, 1) || { type: 'quarter', dots: 0 };
+        const st = this.score.parts[p].staves[s];
+        const pitch = fromDiatonic(clefInfo(clefAt(st, m)).mid);
+        const evs = [];
+        for (let t = 0; t + bt <= a.len; t += bt) evs.push({ id: newId(), rest: false, type: tt.type, dots: tt.dots, notes: [{ ...pitch }], slash: true });
+        if (evs.length) st.measures[m].voices = [evs];
+      }
+    });
+  }
+  // くり返し（MuseScore の R）：選んだ範囲をすぐ後ろにもう一度。足りなければ小節を足す
+  repeatSelection() {
+    const st = this.state, s = st.sel;
+    if (s?.kind === 'range') {
+      const rg = this.rangeStaves(s);
+      const clip = E.copyRange(this.score, rg);
+      const n = rg.m2 - rg.m1 + 1;
+      this.edit('くり返し', () => E.pasteRange(this.score, clip, { m: rg.m2 + 1, staves: rg.staves }));
+      st.sel = { ...s, m1: s.m1 + n, m2: s.m2 + n, a: s.m1 + n };
+      this.refreshOverlays(); this.updateUI();
+      const g = this.L.measures[st.sel.m1];
+      if (g) this.view.ensureVisible(this.L.systems[g.sys].page, g.x0, this.L.systems[g.sys].staffYs[0]);
+      return;
+    }
+    if (s?.kind === 'event') {
+      const f = E.findEvent(this.score, s.to || s.id);
+      if (!f) return;
+      const nx = E.caretNext(this.score, { p: f.p, s: f.s, m: f.m, v: f.v, t: f.t });
+      let r;
+      this.edit('くり返し', () => { r = E.enterNote(this.score, nx, { type: f.ev.type, dots: f.ev.dots, pitches: f.ev.rest ? null : f.ev.notes.map(n => ({ step: n.step, alter: n.alter, octave: n.octave })) }); });
+      if (r) { st.sel = { kind: 'event', id: r.ids[0], noteIndex: null }; this.afterSelect(E.findEvent(this.score, r.ids[0])?.ev); }
+      return;
+    }
+    this.toast('くり返す音符か小節を選んでください');
+  }
+  // 声部1 と 声部2 を入れ替える
+  swapVoices() {
+    const rg = this.rangeOrMeasure();
+    if (!rg) return this.toast('小節を選んでください');
+    this.edit('声部の入れ替え', () => {
+      const A = measureAttrs(this.score);
+      for (const [p, s] of rg.staves) for (let m = rg.m1; m <= rg.m2; m++) {
+        const sm = this.score.parts[p].staves[s].measures[m];
+        const v0 = sm.voices[0], v1 = sm.voices[1];
+        sm.voices[0] = v1 && v1.length ? v1 : [measureRest(A[m].len)];
+        if (v0 && v0.some(e => !e.rest)) sm.voices[1] = v0; else sm.voices.length = 1;
+      }
+    });
+  }
+  // 音程を重ねる（MuseScore の Alt+数字）：選んだ音の上（dir=-1 で下）に n 度の音を足す
+  addInterval(n, dir = 1) {
+    const ids = this.selIds();
+    if (!ids.length) return this.toast('先に音符を選ぶか入力してください');
+    let last = null;
+    this.edit(`${n}度を重ねる`, () => {
+      let any = false;
+      for (const id of ids) {
+        const f = E.findEvent(this.score, id);
+        if (!f || f.ev.rest) continue;
+        const base = dir > 0 ? f.ev.notes[f.ev.notes.length - 1] : f.ev.notes[0];
+        const q = fromDiatonic(diatonic(base) + dir * (n - 1));
+        q.alter = keyAlter(this.L.attrs[f.m].fifths, q.step);
+        E.addToChord(this.score, id, q);
+        last = q; any = true;
+      }
+      if (!any) return false;
+    });
+    if (last) this.audition([last]);
+  }
+  // 符尾の向きを反転（MuseScore の X）。auto = 自動に戻す
+  flipStem(auto = false) {
+    const ids = this.selIds();
+    if (!ids.length) return this.toast('先に音符を選んでください');
+    this.edit('符尾の向き', () => {
+      for (const id of ids) {
+        const ev = E.findEvent(this.score, id)?.ev;
+        if (!ev || ev.rest) continue;
+        if (auto) { delete ev.stem; continue; }
+        const g = this.L.evGeom[id];
+        ev.stem = g && g.up ? 'down' : 'up';
+      }
+    });
+  }
+  // 小節の幅を広げる / 狭める（MuseScore の { }）
+  stretchMeasures(factor) {
+    const rg = this.rangeOrMeasure();
+    if (!rg) return this.toast('小節を選んでください');
+    this.edit('小節の幅', () => {
+      for (let m = rg.m1; m <= rg.m2; m++) {
+        const ms = this.score.measures[m];
+        if (!factor) { delete ms.stretch; continue; }
+        const v = Math.max(0.4, Math.min(4, (ms.stretch || 1) * factor));
+        if (Math.abs(v - 1) < 0.04) delete ms.stretch; else ms.stretch = +v.toFixed(3);
+      }
+    });
+  }
+  // 選んでいる小節の範囲（選んでいなければ、選んだ音符・カーソルのある小節1つ）
+  rangeOrMeasure() {
+    const s = this.state.sel;
+    if (s?.kind === 'range') return this.rangeStaves(s);
+    const loc = this.state.mode === 'input' ? this.state.caret : this.selLoc();
+    return loc ? { m1: loc.m, m2: loc.m, staves: [[loc.p, loc.s]] } : null;
+  }
+  // 第◯小節へ移動（Ctrl+G）。練習番号（A, B …）でも
+  gotoMeasure(v) {
+    if (v == null) return this.dialogs.ask('小節へ移動', '小節番号（例：25）か練習番号（例：B）', '', (x) => x && this.gotoMeasure(x));
+    const reh = K.rehearsalLabels(this.score);
+    let m = Object.keys(reh).find(k => reh[k].toUpperCase() === String(v).trim().toUpperCase());
+    m = m != null ? +m : (parseInt(v, 10) || 0) - 1;
+    if (!(m >= 0 && m < this.score.measures.length)) return this.toast('その小節はありません');
+    this.state.mode = 'select';
+    this.state.sel = { kind: 'range', m1: m, m2: m, r1: 0, r2: 0, a: m, ra: 0 };
+    this.refreshOverlays(); this.updateUI();
+    const g = this.L.measures[m], sy = this.L.systems[g.sys];
+    this.view.ensureVisible(sy.page, g.x0, sy.staffYs[0], 160);
+    this.toast(`第${m + 1}小節`);
+  }
+  // ループ再生（選んだ小節の範囲をくり返し再生）
+  toggleLoop() {
+    const s = this.state.sel;
+    if (this.loop) { this.loop = null; this.toast('ループ再生：オフ'); }
+    else {
+      const m1 = s?.kind === 'range' ? s.m1 : this.focusMeasure(), m2 = s?.kind === 'range' ? s.m2 : m1;
+      this.loop = { m1, m2 };
+      this.toast(`ループ再生：第${m1 + 1}〜${m2 + 1}小節`);
+    }
+    if (this.player.playing) { this.player.stop(true); this.togglePlay(); }
+    this.updateUI();
+  }
+
   staffRows() { return staffList(this.score); }
+  get E() { return E; }
   // 小節の挿入位置など（選択 or カーソルの小節）
   targetMeasure() { return this.focusMeasure(); }
   durTicks() { return dottedTicks(this.state.dur.type, this.state.dur.dots); }

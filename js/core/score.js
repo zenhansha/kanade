@@ -144,6 +144,8 @@ export function fillMeasures(score) {
   }
 }
 
+export const TEMPO_UNIT = { quarter: 1, half: 2, eighth: 0.5, quarterDot: 1.5, halfDot: 3, eighthDot: 0.75 };
+
 // 各小節の「その時点で有効な」拍子・調・テンポなどを計算する
 export function measureAttrs(score) {
   const out = [];
@@ -153,7 +155,8 @@ export function measureAttrs(score) {
     const prevKey = key.fifths;
     if (m.time) time = m.time;
     if (m.key) key = m.key;
-    if (m.tempo) bpm = m.tempo.bpm;
+    // テンポの拍の単位（2分・8分・付点4分 …）は、4分音符いくつぶんかに直して持つ
+    if (m.tempo) bpm = m.tempo.bpm * (TEMPO_UNIT[m.tempo.unit] || 1);
     const full = measureTicks(time);
     const len = m.pickup ? Math.min(m.pickup, full) : full;
     out.push({ index: i, time, fifths: key.fifths, prevFifths: prevKey, bpm, len, full, start, timeChanged: timeChanged || i === 0, keyChanged: keyChanged || i === 0, tempo: m.tempo || null, m });

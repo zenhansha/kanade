@@ -47,28 +47,6 @@ export class Tools {
     return r;
   }
 
-  // ───────── ツールメニュー ─────────
-  menu(anchor) {
-    const a = this.app;
-    const sel = a.state.sel;
-    const hasRange = sel?.kind === 'range' || sel?.kind === 'event';
-    const target = hasRange ? '選択範囲' : '全体';
-    this.dlg.menu(anchor, [
-      { head: '入力' },
-      { label: (this.rec.active ? '■ 録音を止める' : '● リアルタイム入力（HyperScribe）…'), run: () => (this.rec.active ? this.stopRec() : this.hyperscribe()) },
-      { head: `一括編集（${target}）` },
-      ...this.massItems(),
-      { head: '再生' },
-      { label: '再生の設定（表情付き再生・スウィング・メトロノーム）…', run: () => this.playback() },
-      { label: 'ミキサー（音量・左右・ミュート・ソロ）…', run: () => this.mixer() },
-      { label: '外部 MIDI 音源で鳴らす…', run: () => this.midiOut() },
-      { head: '書き出し' },
-      { label: 'MIDI ファイルに書き出す（.mid）', run: () => this.exportMidi() },
-      { label: 'オーディオに書き出す（.wav）', run: () => this.exportWav() },
-      { head: 'チェック' },
-      { label: (a.viewOpts.rangeCheck ? '✓ ' : '') + '音域チェック（楽器の音域外を赤く）', run: () => { a.viewOpts.rangeCheck = !a.viewOpts.rangeCheck; a.relayout(); a.toast(a.viewOpts.rangeCheck ? '音域から外れた音を赤で表示しています' : '音域チェック：オフ'); } },
-    ]);
-  }
   massItems() {
     return [
       { label: '移調…', run: () => this.transpose() },

@@ -24,7 +24,7 @@ import { measureAttrs, staffList, clefAt, evTicks, INST, RANGES } from '../core/
 import { midiOf } from '../core/music.js';
 import { DRUM, drumOf, tabFrets } from '../core/perc.js';
 import { positions } from '../core/edit.js';
-import { ARTICS, DYNAMICS, SPANS, JUMPS, parseChord, partTrans, writtenFifths, writtenScore } from '../core/marks.js';
+import { ARTICS, DYNAMICS, SPANS, JUMPS, parseChord, partTrans, writtenFifths, writtenScore, NOTEHEADS, TREMS, FINGERS, articGlyph, isFermata, fretShape, rehearsalLabels } from '../core/marks.js';
 
 const G = SMUFL.glyphs, D = SMUFL.defaults;
 const STEM_W = D.stemThickness, LEDGER_W = D.legerLineThickness, LEDGER_EXT = D.legerLineExtension;
@@ -34,6 +34,9 @@ const f = (n) => Math.round(n * 1000) / 1000;
 const yOf = (pos) => 2 - pos / 2;
 const gw = (name) => (G[name] && G[name].ne ? G[name].ne[0] : 1);
 const gh = (name) => (G[name] && G[name].ne ? G[name].ne[1] - G[name].sw[1] : 1);
+// 符尾を付ける位置（グリフにない符頭は外枠から作る）
+const anc = (name) => (G[name]?.a?.stemUpSE ? G[name].a : { stemUpSE: [gw(name), 0.168], stemDownNW: [0, -0.168] });
+const CUE = 0.72; // 小さい音符（キュー）の大きさ
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
 const HEAD = { breve: 'noteheadDoubleWhole', whole: 'noteheadWhole', half: 'noteheadHalf' };
@@ -130,11 +133,15 @@ function beamGroups(pes, time) {
       if (inside.length === 4 && inside.every(pe => !pe.rest && pe.type === 'eighth' && !pe.dots && !pe.tuplet)) inside.forEach(pe => (halfBarKey[pe.id] = 'H' + h));
     }
   }
-  let cur = null;
+  let cur = null, brk = 0;
   for (const pe of pes) {
-    const beamable = !pe.rest && pe.flags > 0;
+    // ev.beam：'start' = ここから新しい連桁、'join' = 前の音符とつなぐ（拍をまたいでも）、'none' = つながない（旗）
+    const bm = pe.ev.beam;
+    const beamable = !pe.rest && pe.flags > 0 && !pe.noStem && bm !== 'none';
     if (!beamable) { cur = null; continue; }
-    const key = pe.tuplet ? 'T' + pe.tuplet.id : halfBarKey[pe.id] || 'B' + Math.floor(pe.start / beat);
+    if (bm === 'start') brk++;
+    let key = (pe.tuplet ? 'T' + pe.tuplet.id : halfBarKey[pe.id] || 'B' + Math.floor(pe.start / beat)) + ':' + brk;
+    if (bm === 'join' && cur) key = cur.key;
     if (cur && cur.key === key) cur.members.push(pe);
     else { cur = { key, members: [pe] }; groups.push(cur); }
   }
@@ -158,10 +165,13 @@ function prepStaffMeasure(sm, attr, clefKey, prevLast, kind = 'std') {
         flags: TYPE_FLAGS[ev.type] || 0, tuplet: ev.tuplet || null,
         notes: ev.rest ? [] : ev.notes.map(mapNote).sort((a, b) => a.pos - b.pos),
         art: ev.art && ev.art.length ? ev.art : null, lyr: ev.lyr || null,
+        small: !!ev.small, stemDir: ev.stem || null, arp: ev.arp || null, trem: ev.trem || null, slash: !!ev.slash && !ev.rest, noStem: !!ev.slash && !ev.rest,
         grace: ev.grace && ev.grace.length && !ev.mr ? ev.grace.map(g => ({ type: g.type, slash: g.slash, flags: Math.max(1, TYPE_FLAGS[g.type] || 1), notes: g.notes.map(mapNote).sort((a, b) => a.pos - b.pos) })) : null,
         up: true, beam: null, prev: null,
       };
     });
+    // スラッシュ（リズム譜）：音の高さは関係なく、真ん中の線に斜線を1つ
+    for (const pe of pes) if (pe.slash) { pe.notes = [{ ...pe.notes[0], pos: 0, slashHead: true }]; pe.flags = 0; }
     // 前のイベント（タイの続きかどうかの判定用）
     pes.forEach((pe, i) => (pe.prev = i > 0 ? pes[i - 1] : prevLast[v] || null));
     res.voices[v] = pes;
@@ -179,6 +189,7 @@ function prepStaffMeasure(sm, attr, clefKey, prevLast, kind = 'std') {
       state[key] = alt;
     }
     for (const nt of pe.notes) {
+      if (nt.slashHead) continue;
       const n = nt.n, key = n.step + n.octave, alt = n.alter || 0;
       const cur = key in state ? state[key] : keyAlter(attr.fifths, n.step);
       const tiedIn = pe.prev && !pe.prev.rest && pe.prev.ev.notes.some(q => q.tie && q.step === n.step && q.octave === n.octave && (q.alter || 0) === alt);
@@ -193,21 +204,33 @@ function prepStaffMeasure(sm, attr, clefKey, prevLast, kind = 'std') {
     const pes = res.voices[v];
     const groups = beamGroups(pes, attr.time);
     for (const g of groups) {
-      const up = multi ? v % 2 === 0 : perc ? true : autoUp(g.members.flatMap(pe => pe.notes.map(n => n.pos)));
+      const forced = g.members.find(pe => pe.stemDir);
+      const up = forced ? forced.stemDir === 'up' : multi ? v % 2 === 0 : perc ? true : autoUp(g.members.flatMap(pe => pe.notes.map(n => n.pos)));
       g.up = up; g.v = v;
       g.members.forEach(pe => { pe.beam = g; pe.up = up; });
     }
     res.voices[v].groups = groups;
     for (const pe of pes) {
       if (pe.rest || pe.beam) continue;
-      pe.up = multi ? v % 2 === 0 : perc ? true : autoUp(pe.notes.map(n => n.pos));
+      pe.up = pe.stemDir ? pe.stemDir === 'up' : multi ? v % 2 === 0 : perc ? true : autoUp(pe.notes.map(n => n.pos));
     }
     for (const pe of pes) {
       finishPE(pe, multi);
       // ドラム：× や ◇ の符頭は音ごと（ハイハット × とスネア ● が同じ和音にあることもある）
+      const hk = pe.type === 'whole' || pe.type === 'breve' ? 'whole' : pe.type === 'half' ? 'half' : 'black';
       if (perc && !pe.rest) for (const nt of pe.notes) {
         const h = DRUM_HEAD[drumOf(nt.n).head];
-        if (h) nt.headG = h[pe.type === 'whole' || pe.type === 'breve' ? 'whole' : pe.type === 'half' ? 'half' : 'black'];
+        if (h) nt.headG = h[hk];
+      }
+      // 符頭の形（Phase 4）。スラッシュ・× など。全部の音が同じ形なら、符尾の位置もその形に合わせる
+      if (!pe.rest) for (const nt of pe.notes) {
+        const h = NOTEHEADS[nt.slashHead ? 'slash' : nt.n.head];
+        if (h) nt.headG = h[hk];
+      }
+      if (!pe.rest && pe.notes.length && pe.notes.every(nt => nt.headG && nt.headG === pe.notes[0].headG)) {
+        const old = pe.headW;
+        pe.headG = pe.notes[0].headG; pe.headW = gw(pe.headG) * (pe.small ? CUE : 1);
+        pe.rightW += pe.headW - old; pe.dotX += pe.headW - old;
       }
     }
   }
@@ -223,12 +246,14 @@ function finishPE(pe, multi) {
     if (multi) pos += pe.v % 2 === 0 ? (pe.mr || pe.type === 'whole' ? 2 : 4) : (pe.mr || pe.type === 'whole' ? -4 : -4);
     pe.restPos = pos;
     pe.leftW = 0;
-    pe.rightW = pe.headW + (pe.dots ? 0.3 + pe.dots * 0.5 : 0);
+    pe.rightW = pe.headW + (pe.dots ? 0.3 + pe.dots * 0.5 : 0) + (pe.art && pe.art.some(a => ARTICS[a]?.side === 'after') ? 1.1 : 0);
     finishGrace(pe);
     return;
   }
   const headG = HEAD[pe.type] || 'noteheadBlack';
-  pe.headG = headG; pe.headW = gw(headG);
+  const sc = pe.small ? CUE : 1;
+  pe.sc = sc;
+  pe.headG = headG; pe.headW = gw(headG) * sc;
   const ns = pe.notes; // 下から順
   const stemless = pe.type === 'whole' || pe.type === 'breve';
   if (pe.up || stemless) {
@@ -248,17 +273,22 @@ function finishPE(pe, multi) {
     n.col = c;
   });
   const leftDisp = ns.some(n => n.side < 0) ? shift : 0;
-  const colW = cols.map(c => Math.max(...c.map(n => gw(n.acc))) + 0.12);
+  const colW = cols.map(c => Math.max(...c.map(n => gw(n.acc) * sc)) + 0.12);
   pe.accRight = []; // 列ごとの右端位置（符頭の左端からの距離）
   let acc = leftDisp + 0.2;
   colW.forEach((w, i) => { pe.accRight[i] = acc; acc += w; });
-  ns.forEach(n => { if (n.acc) n.accX = -pe.accRight[n.col] - gw(n.acc); });
+  ns.forEach(n => { if (n.acc) n.accX = -pe.accRight[n.col] - gw(n.acc) * sc; });
   pe.leftW = (cols.length ? acc : 0) + leftDisp;
+  if (ns.some(n => n.n.paren)) pe.leftW += 0.45;
+  // アルペジオの波線は臨時記号のさらに左
+  if (pe.arp) { pe.arpX = -pe.leftW - 1.2; pe.leftW += 1.3; }
+  if (pe.art && pe.art.some(a => ARTICS[a]?.side === 'before')) { pe.beforeX = -pe.leftW - 1.4; pe.leftW += 1.5; }
   const rightDisp = ns.some(n => n.side > 0) ? shift : 0;
-  const flagW = !pe.beam && pe.flags && pe.up ? gw('flag8thUp') : 0;
-  pe.dotX = pe.headW + rightDisp + 0.3;
-  pe.rightW = pe.headW + rightDisp + (pe.dots ? 0.3 + pe.dots * 0.5 : 0) + flagW;
-  if (pe.art && pe.art.includes('breath')) pe.rightW += 1.1;
+  const flagW = !pe.beam && pe.flags && pe.up && !pe.noStem ? gw('flag8thUp') * sc : 0;
+  pe.dotX = pe.headW + rightDisp + 0.3 + (ns.some(n => n.n.paren) ? 0.45 : 0);
+  pe.rightW = pe.dotX - 0.3 + (pe.dots ? 0.3 + pe.dots * 0.5 : 0) + flagW;
+  if (pe.art && pe.art.some(a => ARTICS[a]?.side === 'after')) pe.rightW += 1.1;
+  if (pe.art && pe.art.some(a => ARTICS[a]?.side === 'right')) pe.rightW += 1.6;
   finishGrace(pe);
 }
 // 装飾音符の幅：本音符の左（臨時記号のさらに左）に並べる
@@ -286,7 +316,9 @@ export function layoutScore(score0, opts = {}) {
   const SL = staffList(score).filter(row => !showParts || showParts.includes(row.p));
   const M = score.measures.length;
   const spMm = score.settings.staffMm / 4;
-  const pageW = score.settings.page.w / spMm, pageH = score.settings.page.h / spMm;
+  // opts.continuous = 1段スクロール表示（Finale のスクロール表示）：全部の小節を1つの長い段に並べる
+  const cont = !!opts.continuous;
+  let pageW = score.settings.page.w / spMm, pageH = score.settings.page.h / spMm;
   const mg = { t: score.settings.margin.t / spMm, b: score.settings.margin.b / spMm, l: score.settings.margin.l / spMm, r: score.settings.margin.r / spMm };
   const shown = showParts ? showParts.map(p => score.parts[p]) : score.parts;
   const LY = { sysGap: 7, staffGap: 6.5, partGap: 7.5, ...(score.settings.layout || {}) };
@@ -347,6 +379,7 @@ export function layoutScore(score0, opts = {}) {
       if (o) o.rightW = Math.max(o.rightW, chordWidth(d.text) + 0.8);
     }));
     const len = A[m].len;
+    const spf = (score.settings.spacing || 1) * (score.measures[m].stretch || 1);
     let ons = [...on.values()].sort((a, b) => a.t - b.t);
     if (!ons.length) ons = [{ t: 0, leftW: 0, rightW: 0 }];
     const xs = [], ideals = [];
@@ -354,13 +387,13 @@ export function layoutScore(score0, opts = {}) {
     ons.forEach((o, i) => {
       xs.push(x);
       const nextT = i + 1 < ons.length ? ons[i + 1].t : len;
-      const id = ideal(nextT - o.t);
+      const id = ideal(nextT - o.t) * spf;
       ideals.push(id);
       const need = i + 1 < ons.length ? o.rightW + ons[i + 1].leftW + 0.45 : o.rightW + 0.9;
       x += Math.max(id, need);
     });
     let cw = x;
-    if (allMr) cw = Math.max(cw, 8);
+    if (allMr) cw = Math.max(cw, 8 * spf);
     if (score.measures[m].repeatEnd) cw += 1.4;
     const startPad = 1.1 + (score.measures[m].repeatStart ? 1.5 : 0);
     MS[m] = { ons: ons.map((o, i) => ({ t: o.t, x: xs[i] })), ideals, cw, startPad, allMr };
@@ -407,8 +440,10 @@ export function layoutScore(score0, opts = {}) {
   const multiPart = shown.length > 1;
   const hasBrace = shown.some(p => p.staves.length > 1);
   const bracketW = (multiPart ? 1.6 : 0) + (hasBrace ? 1.4 : 0);
-  const fullNameW = showParts ? 0 : Math.max(0, ...shown.map(p => measureText(p.name, nameSize)));
-  const abbrW = multiPart && !showParts ? Math.max(0, ...shown.map(p => measureText(p.abbr, nameSize))) : 0;
+  // 楽器名：abbr = 最初はフルネーム・2段目から略称（初期値）、full = いつもフルネーム、first = 最初の段だけ、none = 出さない
+  const INAMES = score.settings.instNames || 'abbr';
+  const fullNameW = showParts || INAMES === 'none' ? 0 : Math.max(0, ...shown.map(p => measureText(p.name, nameSize)));
+  const abbrW = !showParts && (INAMES === 'full' ? true : INAMES === 'abbr' && multiPart) ? Math.max(0, ...shown.map(p => measureText(INAMES === 'full' ? p.name : p.abbr, nameSize))) : 0;
   const indent0 = (fullNameW ? fullNameW + 1.6 : showParts ? 3 : 0) + bracketW;
   const indentN = (abbrW ? abbrW + 1.6 : 0) + bracketW;
   const right = pageW - mg.r;
@@ -420,7 +455,7 @@ export function layoutScore(score0, opts = {}) {
   for (let i = 0; i < M;) {
     const x0 = mg.l + (systems.length === 0 ? indent0 : indentN);
     const hdr = sysHeader(i);
-    const avail = right - x0 - hdr;
+    const avail = cont ? Infinity : right - x0 - hdr;
     const ms = [];
     let used = 0;
     let j = i;
@@ -428,11 +463,11 @@ export function layoutScore(score0, opts = {}) {
       const w = unitW(j, i);
       // keep = 次の小節と同じ段にする（「前の段へ」で付く）。perSystem = 1段の小節数を決めている
       const forced = j > i && score.measures[j - 1].keep;
-      if (ms.length && !forced && (used + w > avail || (LY.perSystem > 0 && !showParts && ms.length >= LY.perSystem))) break;
+      if (ms.length && !forced && (used + w > avail || (LY.perSystem > 0 && !showParts && !cont && ms.length >= LY.perSystem))) break;
       const g = mrGroups[j];
       if (g) { for (let q = g.first; q <= g.last; q++) ms.push(q); j = g.last + 1; } else { ms.push(j); j++; }
       used += w;
-      if (!showParts && score.measures[j - 1].sysBreak) break;
+      if (!showParts && !cont && score.measures[j - 1].sysBreak) break;
     }
     systems.push({ x0, x1: right, hdr, ms, used, avail, first: i });
     i = j;
@@ -440,7 +475,7 @@ export function layoutScore(score0, opts = {}) {
   // 右端をそろえる（最後の段は短ければ詰めたまま）
   systems.forEach((sy, k) => {
     const last = k === systems.length - 1;
-    let extra = sy.avail - sy.used;
+    let extra = cont ? 0 : sy.avail - sy.used;
     if (last && sy.used < sy.avail * 0.6) extra = 0;
     // 詰め込みすぎた段（keep や 1段の小節数の指定）は、間隔を縮めて入れる
     if (extra < 0) extra = Math.max(extra, -sy.used * 0.45);
@@ -465,6 +500,12 @@ export function layoutScore(score0, opts = {}) {
     });
   });
 
+  if (cont) {
+    // 1段スクロール：ページの幅を段の長さに合わせる
+    const sy = systems[0];
+    pageW = sy.x0 + sy.hdr + sy.used + mg.r + 2;
+    sy.x1 = pageW - mg.r;
+  }
   // ── 4. draw ──
   const evGeom = {};
   const rowsOut = systems.map(() => SL.map((_, r) => ({ s: [], top: -1, bot: rowH[r] + 1 })));
@@ -590,6 +631,15 @@ export function layoutScore(score0, opts = {}) {
 
   function drawMeasure(out, k, r, row, m, geo) {
     const pr = prep[m][r];
+    // 小節の繰り返し記号（直前の小節をもう一度）
+    if (row.staff.measures[m].mrep) {
+      const ev = row.staff.measures[m].voices[0][0];
+      const xc = (geo.cx + geo.x1) / 2;
+      out.push(`<g class="ev v0" data-id="${ev.id}">${glyphC('repeat1Bar', xc, 2)}</g>`);
+      box(k, r, xc - 1.2, xc + 1.2, 0.8, 3.2);
+      evGeom[ev.id] = { id: ev.id, k, r, p: row.p, s: row.s, m, v: 0, t: 0, x: xc - 1.2, xr: xc + 1.2, top: 0, bot: 4, notes: [], up: true, rest: true };
+      return;
+    }
     pr.voices.forEach((pes, v) => {
       if (!pes) return;
       for (const pe of pes) drawEvent(out, k, r, row, m, geo, pe);
@@ -617,11 +667,17 @@ export function layoutScore(score0, opts = {}) {
       const minX = x + Math.min(0, ...ns.map(n => n.dx)) - LEDGER_EXT, maxX = x + pe.headW + Math.max(0, ...ns.map(n => n.dx)) + LEDGER_EXT;
       for (let L = 6; L <= top; L += 2) g.push(line(minX, yOf(L), maxX, yOf(L), LEDGER_W, 'ledger'));
       for (let L = -6; L >= bot; L -= 2) g.push(line(minX, yOf(L), maxX, yOf(L), LEDGER_W, 'ledger'));
+      const cue = pe.small ? 'cue' : '';
       for (const n of ns) {
         const y = yOf(n.pos);
         const rg = range[r], cm = rg ? midiOf(n.n) + (rowTrans[r]?.chromatic || 0) : 0;
-        g.push(glyph(n.headG || pe.headG, x + n.dx, y, rg && (cm < rg[0] || cm > rg[1]) ? 'oor' : ''));
-        if (n.acc) g.push(glyph(n.acc, x + n.accX, y));
+        const hg = n.headG || pe.headG;
+        g.push(glyph(hg, x + n.dx, y, [cue, rg && !n.slashHead && (cm < rg[0] || cm > rg[1]) ? 'oor' : ''].filter(Boolean).join(' ')));
+        if (n.n.paren) {
+          const hw = gw(hg) * pe.sc;
+          g.push(glyph('noteheadParenthesisLeft', x + n.dx - 0.5, y, cue), glyph('noteheadParenthesisRight', x + n.dx + hw + 0.08, y, cue));
+        }
+        if (n.acc) g.push(glyph(n.acc, x + n.accX - (n.n.paren ? 0.45 : 0), y, cue));
         geom.notes.push({ pos: n.pos, y, hx: x + n.dx, k: n.k, n: n.n });
       }
       if (pe.dots) {
@@ -636,24 +692,25 @@ export function layoutScore(score0, opts = {}) {
       geom.top = Math.min(yOf(top) - 0.5, geom.top);
       geom.bot = Math.max(yOf(bot) + 0.5, geom.bot);
       geom.headTop = yOf(top) - 0.5; geom.headBot = yOf(bot) + 0.5;
-      // 符尾と旗（連桁がある音符は drawBeam で描く）
-      if (pe.type !== 'whole' && pe.type !== 'breve' && !pe.beam) {
-        const a = G[pe.headG].a;
-        const extra = pe.flags > 2 ? (pe.flags - 2) * 0.75 : 0;
+      // 符尾と旗（連桁がある音符は drawBeam で描く）。小さい音符は符尾も短く
+      if (pe.type !== 'whole' && pe.type !== 'breve' && !pe.beam && !pe.noStem) {
+        const a = anc(pe.headG), sc = pe.sc;
+        const extra = (pe.flags > 2 ? (pe.flags - 2) * 0.75 : 0) + (pe.trem && pe.flags ? 0.6 : 0);
+        const SL0 = (pe.small ? 2.7 : 3.5) + (pe.trem ? 0.5 : 0);
         if (pe.up) {
-          const sx = x + a.stemUpSE[0] - STEM_W / 2;
-          const y1 = yOf(bot) - a.stemUpSE[1];
-          const y2 = Math.min(yOf(top) - 3.5 - extra, 2);
+          const sx = x + a.stemUpSE[0] * sc - STEM_W / 2;
+          const y1 = yOf(bot) - a.stemUpSE[1] * sc;
+          const y2 = Math.min(yOf(top) - SL0 - extra, pe.small ? 99 : 2);
           g.push(line(sx, y1, sx, y2, STEM_W, 'stem'));
-          if (pe.flags) { const fg = 'flag' + FLAG[pe.flags] + 'Up'; const an = G[fg].a.stemUpNW; g.push(glyph(fg, sx - STEM_W / 2 - an[0], y2 + an[1])); }
+          if (pe.flags) { const fg = 'flag' + FLAG[pe.flags] + 'Up'; const an = G[fg].a.stemUpNW; g.push(glyph(fg, sx - STEM_W / 2 - an[0] * sc, y2 + an[1] * sc, cue)); }
           geom.top = Math.min(geom.top, y2);
           geom.stemX = sx; geom.stemEnd = y2;
         } else {
-          const sx = x + a.stemDownNW[0] + STEM_W / 2;
-          const y1 = yOf(top) - a.stemDownNW[1];
-          const y2 = Math.max(yOf(bot) + 3.5 + extra, 2);
+          const sx = x + a.stemDownNW[0] * sc + STEM_W / 2;
+          const y1 = yOf(top) - a.stemDownNW[1] * sc;
+          const y2 = Math.max(yOf(bot) + SL0 + extra, pe.small ? -99 : 2);
           g.push(line(sx, y1, sx, y2, STEM_W, 'stem'));
-          if (pe.flags) { const fg = 'flag' + FLAG[pe.flags] + 'Down'; const an = G[fg].a.stemDownSW; g.push(glyph(fg, sx - STEM_W / 2 - an[0], y2 + an[1])); }
+          if (pe.flags) { const fg = 'flag' + FLAG[pe.flags] + 'Down'; const an = G[fg].a.stemDownSW; g.push(glyph(fg, sx - STEM_W / 2 - an[0] * sc, y2 + an[1] * sc, cue)); }
           geom.bot = Math.max(geom.bot, y2);
           geom.stemX = sx; geom.stemEnd = y2;
         }
@@ -722,16 +779,16 @@ export function layoutScore(score0, opts = {}) {
     const mem = grp.members;
     const up = grp.up;
     const pts = mem.map(pe => {
-      const a = G[pe.headG].a;
+      const a = anc(pe.headG), sc = pe.sc || 1;
       const x = pe.geom.x;
       const ns = pe.notes;
-      const sx = up ? x + a.stemUpSE[0] - STEM_W / 2 : x + a.stemDownNW[0] + STEM_W / 2;
+      const sx = up ? x + a.stemUpSE[0] * sc - STEM_W / 2 : x + a.stemDownNW[0] * sc + STEM_W / 2;
       const near = up ? yOf(ns[ns.length - 1].pos) : yOf(ns[0].pos);
-      const far = up ? yOf(ns[0].pos) - a.stemUpSE[1] : yOf(ns[ns.length - 1].pos) - a.stemDownNW[1];
+      const far = up ? yOf(ns[0].pos) - a.stemUpSE[1] * sc : yOf(ns[ns.length - 1].pos) - a.stemDownNW[1] * sc;
       return { pe, sx, near, far };
     });
     const maxFlags = Math.max(...mem.map(pe => pe.flags));
-    const L = 3.25 + Math.max(0, maxFlags - 2) * BEAM_GAP;
+    const L = (mem.every(pe => pe.small) ? 2.6 : 3.25) + Math.max(0, maxFlags - 2) * BEAM_GAP + (mem.some(pe => pe.trem) ? 0.8 : 0);
     const first = pts[0], last = pts[pts.length - 1];
     let dy = last.near - first.near;
     // 内側の音が両端より外にはみ出す（山なり・谷なり）なら水平にする
@@ -791,34 +848,102 @@ export function layoutScore(score0, opts = {}) {
   }
 
   // アーティキュレーション：スタッカートなどは符頭側（符尾の反対）、フェルマータや装飾記号は譜表の上
+  // Phase 4：アルペジオ・トレモロ・運指・弦番号・スクープ/フォールもここで（連桁を描いたあとなので符尾の位置が分かる）
   function drawArtics(out, k, r, pes, multi) {
     for (const pe of pes) {
-      if (!pe.art || !pe.geom || pe.mr && !pe.art.includes('ferm')) continue;
+      if (!pe.geom || pe.mr && !(pe.art || []).some(isFermata)) continue;
       const gm = pe.geom;
       const s = [];
       const xc = gm.x + pe.headW / 2;
-      const near = pe.rest ? [] : pe.art.filter(a => ARTICS[a]?.side === 'note').sort((a, b) => NEAR_ORDER.indexOf(a) - NEAR_ORDER.indexOf(b));
-      const far = pe.art.filter(a => ARTICS[a]?.side === 'above');
+      const art = pe.art || [];
+      const near = pe.rest ? [] : art.filter(a => ARTICS[a]?.side === 'note').sort((a, b) => NEAR_ORDER.indexOf(a) - NEAR_ORDER.indexOf(b));
+      const far = art.filter(a => ARTICS[a]?.side === 'above');
       const below = multi ? pe.v % 2 === 1 : pe.rest ? false : pe.up;
+      const ns = pe.notes;
+      // トレモロ：符尾の真ん中あたりに斜線（全音符は符頭の上）
+      if (pe.trem && !pe.rest && TREMS[pe.trem]) {
+        const tg = TREMS[pe.trem].g;
+        if (gm.stemX != null) {
+          const head = pe.up ? yOf(ns[ns.length - 1].pos) - 0.5 : yOf(ns[0].pos) + 0.5;
+          const endY = gm.stemEnd + (pe.up ? 1 : -1) * (pe.flags ? 1.1 + (pe.flags - 1) * 0.75 : 0.2);
+          s.push(glyphC(tg, gm.stemX, (head + endY) / 2));
+        } else {
+          const yc = yOf(ns[ns.length - 1].pos) - 1.6;
+          s.push(glyphC(tg, xc, yc));
+          box(k, r, xc - 0.7, xc + 0.7, yc - 0.8, yc + 0.8);
+        }
+      }
+      // アルペジオ：和音の左に縦の波線（矢印つきは向き）。bracket = アルペジオしないカッコ
+      if (pe.arp && !pe.rest) {
+        const ax = gm.x + pe.arpX, yTop = yOf(ns[ns.length - 1].pos) - 0.7, yBot = yOf(ns[0].pos) + 0.7;
+        if (pe.arp === 'bracket') {
+          s.push(`<path class="arpb" d="M${f(ax + 0.7)} ${f(yTop)}H${f(ax + 0.2)}V${f(yBot)}H${f(ax + 0.7)}" stroke-width="0.16" fill="none"/>`);
+        } else {
+          const len = Math.max(1.2, yBot - yTop);
+          const seg = G.wiggleArpeggiatoUp.a?.repeatOffset?.[0] || 1.02;
+          const n = Math.max(1, Math.round(len / seg));
+          s.push(`<text class="g" transform="translate(${f(ax + 0.62)} ${f(yBot)}) rotate(-90)" x="0" y="0">${G.wiggleArpeggiatoUp.c.repeat(n)}</text>`);
+          const tip = n * seg;
+          const cx = ax + 0.62 - 0.24;
+          if (pe.arp === 'up') s.push(poly([[cx - 0.36, yBot - tip + 0.2], [cx + 0.36, yBot - tip + 0.2], [cx, yBot - tip - 0.55]], 'beam'));
+          if (pe.arp === 'down') s.push(poly([[cx - 0.36, yBot - 0.1], [cx + 0.36, yBot - 0.1], [cx, yBot + 0.65]], 'beam'));
+        }
+        box(k, r, ax, ax + 1.1, yTop - 0.7, yBot + 0.8);
+      }
+      // スクープ・プロップ（左）、ドゥイット・フォール（右）
+      for (const a of art) {
+        const sd = ARTICS[a]?.side;
+        if (pe.rest || (sd !== 'before' && sd !== 'right')) continue;
+        const ny = sd === 'before' ? yOf(ns[0].pos) : yOf(ns[ns.length - 1].pos);
+        const gx = sd === 'before' ? gm.x + (pe.beforeX ?? -1.4) : gm.x + pe.headW + (pe.dots ? pe.dotX + pe.dots * 0.5 - pe.headW : 0.25);
+        s.push(glyph(ARTICS[a].g, gx, ny + (sd === 'before' ? 0.4 : 0.1)));
+        box(k, r, gx, gx + gw(ARTICS[a].g), ny - 1.2, ny + 1.2);
+      }
       if (near.length) {
         let y;
         if (multi && !pe.rest) y = below ? Math.max(gm.stemEnd ?? gm.headBot, gm.headBot) + 0.75 : Math.min(gm.stemEnd ?? gm.headTop, gm.headTop) - 0.75;
         else y = below ? gm.headBot + 0.55 : gm.headTop - 0.55;
         for (const a of near) {
-          const gname = ARTICS[a].g + (below ? 'Below' : 'Above');
+          const gname = articGlyph(a, below);
           const h = gh(gname);
           let yc = below ? y + h / 2 : y - h / 2;
-          if ((a === 'stacc' || a === 'staccss' || a === 'ten') && yc > 0 && yc < 4) {
+          if ((a === 'stacc' || a === 'staccss' || a === 'ten' || a === 'wedge' || a === 'portato') && yc > 0 && yc < 4) {
             yc = below ? Math.ceil(yc - 0.5) + 0.5 : Math.floor(yc - 0.5) + 0.5;
-          } else if (a === 'acc') yc = below ? Math.max(yc, 4.7) : Math.min(yc, -0.7);
+          } else if (a === 'acc' || a === 'accStacc' || a === 'tenAcc') yc = below ? Math.max(yc, 4.7) : Math.min(yc, -0.7);
           s.push(glyphC(gname, xc, yc));
           box(k, r, xc - gw(gname) / 2, xc + gw(gname) / 2, yc - h / 2, yc + h / 2);
           y = below ? yc + h / 2 + 0.3 : yc - h / 2 - 0.3;
         }
       }
+      // 運指・弦番号：符尾と反対側（声部2は下）に、外側へ積む
+      const fings = pe.rest ? [] : ns.filter(nt => nt.n.fing != null && nt.n.fing !== '' || nt.n.strMark);
+      if (fings.length) {
+        const fBelow = multi ? pe.v % 2 === 1 : pe.up && !(pe.type === 'whole');
+        const order = fBelow ? fings : [...fings].reverse();
+        let y = fBelow ? Math.max(gm.headBot + 0.4, ...(multi && gm.stemEnd != null && !pe.up ? [gm.stemEnd + 0.3] : [])) : Math.min(gm.headTop - 0.4, ...(multi && gm.stemEnd != null && pe.up ? [gm.stemEnd - 0.3] : []));
+        for (const nt of order) {
+          const fv = String(nt.n.fing ?? '');
+          if (fv) {
+            const gn = FINGERS[fv];
+            const h = 1.15;
+            const yc = fBelow ? Math.max(y + h / 2, 4.8) : Math.min(y - h / 2, -0.8);
+            if (gn) s.push(glyphC(gn, xc, yc));
+            else s.push(text(fv, xc, yc + 0.5, 1.6, ' text-anchor="middle" font-family="Arial,Helvetica,sans-serif"'));
+            box(k, r, xc - 0.6, xc + 0.6, yc - h / 2, yc + h / 2);
+            y = fBelow ? yc + h / 2 + 0.15 : yc - h / 2 - 0.15;
+          }
+          if (nt.n.strMark && nt.n.str) {
+            const rr = 0.72;
+            const yc = fBelow ? Math.max(y + rr + 0.1, 4.9) : Math.min(y - rr - 0.1, -0.9);
+            s.push(`<circle class="strnum" cx="${f(xc)}" cy="${f(yc)}" r="${rr}" stroke-width="0.11" fill="none"/>`, text(String(nt.n.str), xc, yc + 0.48, 1.3, ' text-anchor="middle" font-family="Arial,Helvetica,sans-serif"'));
+            box(k, r, xc - rr, xc + rr, yc - rr, yc + rr);
+            y = fBelow ? yc + rr + 0.15 : yc - rr - 0.15;
+          }
+        }
+      }
       const farBelow = multi && pe.v % 2 === 1;
       for (const a of far) {
-        const gname = a === 'ferm' ? (farBelow ? 'fermataBelow' : 'fermataAbove') : a === 'marc' ? (farBelow ? 'articMarcatoBelow' : 'articMarcatoAbove') : ARTICS[a].g;
+        const gname = articGlyph(a, farBelow);
         const w = gw(gname), h = gh(gname);
         const x0 = xc - w / 2, x1 = xc + w / 2;
         if (farBelow) {
@@ -831,10 +956,13 @@ export function layoutScore(score0, opts = {}) {
           box(k, r, x0, x1, bot - h, bot);
         }
       }
-      if (pe.art.includes('breath')) {
+      const after = art.find(a => ARTICS[a]?.side === 'after');
+      if (after) {
         const bx = gm.x + pe.rightW - 0.9;
-        s.push(glyph('breathMarkComma', bx, -0.5));
-        box(k, r, bx, bx + 0.7, -1.6, -0.4);
+        const gname = ARTICS[after].g;
+        const cz = after.startsWith('caesura');
+        s.push(glyph(gname, bx, cz ? 0 : -0.5));
+        box(k, r, bx, bx + gw(gname), cz ? -1.2 : -1.6, cz ? 2 : -0.4);
       }
       if (s.length) out.push(`<g class="ev v${pe.v}" data-id="${pe.id}">${s.join('')}</g>`);
     }
@@ -1005,19 +1133,24 @@ export function layoutScore(score0, opts = {}) {
   }
 
   // b. 8va / 8vb / 15ma・トリルの波線
-  for (const it of spanList.filter(x => ['8va', '8vb', '15ma', 'trill'].includes(x.sp.k))) {
+  for (const it of spanList.filter(x => ['8va', '8vb', '15ma', '15mb', 'trill', 'vib'].includes(x.sp.k))) {
     const r = it.r;
-    const down = it.sp.k === '8vb';
+    const down = it.sp.k === '8vb' || it.sp.k === '15mb';
     for (const sg of segmentsOf(it)) {
       const s = [];
-      const gname = it.sp.k === 'trill' ? 'ornamentTrill' : SPANS[it.sp.k].g;
-      const gwid = gw(gname) * (it.sp.k === 'trill' ? 1 : 0.85);
-      const xa = sg.xa - (it.sp.k === 'trill' ? 0 : 0.3), xb = Math.max(sg.xb, xa + gwid + 1);
+      const vib = it.sp.k === 'vib';
+      const gname = it.sp.k === 'trill' ? 'ornamentTrill' : vib ? 'wiggleVibratoMediumFast' : SPANS[it.sp.k].g;
+      const gwid = vib ? 0 : gw(gname) * (it.sp.k === 'trill' ? 1 : 0.85);
+      const xa = sg.xa - (it.sp.k === 'trill' || vib ? 0 : 0.3), xb = Math.max(sg.xb, xa + gwid + 1);
       const hgt = 2.0;
       let base;
       if (down) { const top = Math.max(4.4, skyBot(sg.k, r, xa, xb)) + 0.5; base = top + 1.7; box(sg.k, r, xa, xb, top, top + hgt); }
       else { const bot = Math.min(-0.4, skyTop(sg.k, r, xa, xb)) - 0.5; base = bot - 0.15; box(sg.k, r, xa, xb, bot - hgt, bot); }
-      if (it.sp.k === 'trill') {
+      if (vib) {
+        const wl = G.wiggleVibratoMediumFast.a?.repeatOffset?.[0] || 1.18;
+        const n = Math.max(1, Math.floor((xb - xa) / wl));
+        s.push(`<text class="g" x="${f(xa)}" y="${f(base - 0.6)}">${G.wiggleVibratoMediumFast.c.repeat(n)}</text>`);
+      } else if (it.sp.k === 'trill') {
         s.push(glyph(gname, xa, base));
         const wl = G.wiggleTrill.a?.repeatOffset?.[0] || 0.948;
         const n = Math.max(0, Math.floor((xb - xa - gwid - 0.4) / wl));
@@ -1033,10 +1166,57 @@ export function layoutScore(score0, opts = {}) {
     }
   }
 
+  // b2. 文字＋破線の線（rit. - - -・let ring・P.M.・カッコ線・自由な文字）：譜表の上
+  for (const it of spanList.filter(x => SPANS[x.sp.k]?.above && SPANS[x.sp.k].text != null)) {
+    const r = it.r, D0 = SPANS[it.sp.k];
+    const label = D0.custom ? (it.sp.text || '') : D0.text;
+    for (const sg of segmentsOf(it)) {
+      const xa = sg.xa - 0.2, xb = Math.max(sg.xb, xa + 2);
+      const bot = Math.min(-0.6, skyTop(sg.k, r, xa, xb)) - 0.6;
+      const yl = bot - 1.0;
+      const s = [];
+      let lx = xa;
+      if (label && sg.first) {
+        const tw = measureText(label, TXT);
+        s.push(text(label, xa, bot - 0.35, TXT, D0.it === false || it.sp.k === 'palmMute' || it.sp.k === 'letRing' ? '' : ' font-style="italic"'));
+        lx = xa + tw + 0.4;
+      }
+      const w = 0.14;
+      if (D0.solid) {
+        s.push(`<path class="tline" d="M${f(xa)} ${f(yl + (sg.first ? 1 : 0))}V${f(yl)}H${f(xb)}${sg.last ? `V${f(yl + 1)}` : ''}" stroke-width="${w}" fill="none"/>`);
+      } else if (xb > lx + 0.5) {
+        s.push(line(lx, yl + 0.3, xb, yl + 0.3, w, 'tline', ' stroke-dasharray="0.7 0.5"'));
+        if (sg.last && D0.hook) s.push(line(xb, yl + 0.3, xb, yl + 1.3, w, 'tline'));
+      }
+      rowsOut[sg.k][r].s.push(`<g class="mk" data-id="${it.key}">${s.join('')}</g>`);
+      box(sg.k, r, xa, xb, bot - 2.2, bot);
+      addMark({ key: it.key, ref: { type: 'span', p: it.row.p, s: it.row.s, m: it.m, idx: it.idx }, k: sg.k, r, x0: xa - 0.2, x1: xb + 0.2, y0: bot - 2.4, y1: bot + 0.2 });
+    }
+  }
+  // b3. グリッサンド：最初の音符の符頭から次の音符の符頭へ直線
+  for (const it of spanList.filter(x => x.sp.k === 'gliss')) {
+    const r = it.r;
+    const pa = findPE(r, it.a.m, it.a.t, it.sp.v), pb = findPE(r, it.b.m, it.b.t, it.sp.v);
+    if (!pa?.geom || !pb?.geom || pa.rest || pb.rest) continue;
+    const na = pa.geom.notes[pa.geom.notes.length - 1], nb = pb.geom.notes[pb.geom.notes.length - 1];
+    const same = pa.geom.k === pb.geom.k;
+    const x1 = pa.geom.x + pa.headW + (pa.dots ? pa.dots * 0.5 + 0.4 : 0.3), y1 = na.y;
+    const x2 = same ? pb.geom.x - Math.max(0.3, pb.leftMain || 0) : systems[pa.geom.k].x1 - 0.4;
+    const y2 = same ? nb.y : na.y + Math.sign(nb.y - na.y) * 1.5;
+    const s = [line(x1, y1, x2, y2, 0.14, 'gliss')];
+    const len = Math.hypot(x2 - x1, y2 - y1);
+    if (len > 5) {
+      const ang = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+      s.push(`<text class="t" transform="translate(${f((x1 + x2) / 2)} ${f((y1 + y2) / 2 - 0.35)}) rotate(${f(ang)})" x="0" y="0" font-size="1.5" text-anchor="middle" font-style="italic">gliss.</text>`);
+    }
+    rowsOut[pa.geom.k][r].s.push(`<g class="mk" data-id="${it.key}">${s.join('')}</g>`);
+    addMark({ key: it.key, ref: { type: 'span', p: it.row.p, s: it.row.s, m: it.m, idx: it.idx }, k: pa.geom.k, r, x0: x1, x1: x2, y0: Math.min(y1, y2) - 0.6, y1: Math.max(y1, y2) + 0.6 });
+  }
+
   // c. 強弱記号・松葉・文字の表情記号
   //    強弱と松葉は「強弱の帯」に置き、近くにあるものどうしは同じ高さにそろえる
   const dynItems = systems.map(() => SL.map(() => []));
-  const aboveTexts = [], chordItems = [];
+  const aboveTexts = [], chordItems = [], fretItems = [];
   SL.forEach((row, r) => row.staff.measures.forEach((sm, m) => (sm.dirs || []).forEach((d, idx) => {
     if (!MS[m].geo || MS[m].geo.grp && m !== MS[m].geo.grp.first) return;
     const k = sysOf(m);
@@ -1055,15 +1235,17 @@ export function layoutScore(score0, opts = {}) {
       if ((d.pos || 'above') === 'below') dynItems[k][r].push(item);
       else aboveTexts.push({ ...item, k, r });
     } else if (d.k === 'chord') chordItems.push({ k, r, x, d, key, ref });
+    else if (d.k === 'fret') fretItems.push({ k, r, x, d, key, ref });
   })));
   // 松葉
-  for (const it of spanList.filter(x => x.sp.k === 'cresc' || x.sp.k === 'dim')) {
-    for (const sg of segmentsOf(it)) dynItems[sg.k][it.r].push({ kind: 'hair', x0: sg.xa, x1: sg.xb, it, sg, key: it.key, ref: { type: 'span', p: it.row.p, s: it.row.s, m: it.m, idx: it.idx } });
+  for (const it of spanList.filter(x => x.sp.k === 'cresc' || x.sp.k === 'dim' || x.sp.k === 'crescLine' || x.sp.k === 'dimLine')) {
+    const kind = it.sp.k.endsWith('Line') ? 'tline' : 'hair';
+    for (const sg of segmentsOf(it)) dynItems[sg.k][it.r].push({ kind, x0: sg.xa, x1: sg.xb, it, sg, key: it.key, ref: { type: 'span', p: it.row.p, s: it.row.s, m: it.m, idx: it.idx } });
   }
   dynItems.forEach((rows, k) => rows.forEach((items, r) => {
     if (!items.length) return;
     // 同じ位置で始まる強弱記号のあとに松葉が続くときは、記号の右から始める
-    for (const h of items.filter(i => i.kind === 'hair')) {
+    for (const h of items.filter(i => i.kind === 'hair' || i.kind === 'tline')) {
       const st = items.find(i => i.kind === 'dyn' && Math.abs(i.x0 - h.x0) < 2.2 && i.x1 > h.x0);
       if (st) h.x0 = st.x1 + 0.4;
       const en = items.find(i => i.kind === 'dyn' && i.x0 >= h.x0 && i.x0 < h.x1 + 0.3);
@@ -1088,7 +1270,11 @@ export function layoutScore(score0, opts = {}) {
         let svg;
         if (it.kind === 'dyn') svg = glyph(it.gname, it.x0, base);
         else if (it.kind === 'text') svg = text(it.d.text, it.x0, base - 0.25, TXT, it.d.it === false ? '' : ' font-style="italic"');
-        else {
+        else if (it.kind === 'tline') {
+          const label = SPANS[it.it.sp.k].text;
+          const tw = it.sg.first ? measureText(label, TXT) + 0.4 : 0;
+          svg = (it.sg.first ? text(label, it.x0, base - 0.25, TXT, ' font-style="italic"') : '') + (it.x1 > it.x0 + tw + 0.6 ? line(it.x0 + tw, base - 0.75, it.x1, base - 0.75, 0.13, 'tline', ' stroke-dasharray="0.7 0.5"') : '');
+        } else {
           const cy = base - 0.6, hw = 0.65;
           const cresc = it.it.sp.k === 'cresc';
           // 段をまたぐ松葉は、続きの側を少し開いた形にする
@@ -1136,7 +1322,7 @@ export function layoutScore(score0, opts = {}) {
         rowsOut[k][r].s.push(`<g class="mk lyr" data-id="${key}">${text(ly.t, xc, y, LYR, ' text-anchor="middle"')}</g>`);
         ext(k, r, 0, y + 0.8);
         addMark({ key, ref: { type: 'lyr', id: pe.id, verse }, k, r, x0: xc - w / 2 - 0.2, x1: xc + w / 2 + 0.2, y0: y - 2, y1: y + 0.6 });
-        (lyrSeq[`${r}:${verse}`] = lyrSeq[`${r}:${verse}`] || []).push({ k, x0: xc - w / 2, x1: xc + w / 2, y, h: !!ly.h, m, t: pe.start });
+        (lyrSeq[`${r}:${verse}`] = lyrSeq[`${r}:${verse}`] || []).push({ k, x0: xc - w / 2, x1: xc + w / 2, y, h: !!ly.h, ext: !!ly.ext, m, t: pe.start, v: pe.v });
       });
     }));
   }
@@ -1144,6 +1330,23 @@ export function layoutScore(score0, opts = {}) {
     const seq = lyrSeq[key].sort((a, b) => a.m - b.m || a.t - b.t);
     const r = +key.split(':')[0];
     seq.forEach((a, i) => {
+      // 伸ばし線（メリスマ）：同じ声部の、次の歌詞の前の最後の音符まで
+      if (a.ext) {
+        const b = seq[i + 1];
+        const key2 = (mm, tt) => mm * 1e7 + tt;
+        let last = null;
+        for (let m = a.m; m < M && (!b || m <= b.m); m++) for (const pe of prep[m][r].voices[a.v] || []) {
+          const kk = key2(m, pe.start);
+          if (kk <= key2(a.m, a.t) || (b && kk >= key2(b.m, b.t)) || pe.rest || !pe.geom) continue;
+          last = pe;
+        }
+        if (last) {
+          const k2 = last.geom.k;
+          if (k2 === a.k) rowsOut[a.k][r].s.push(line(a.x1 + 0.2, a.y + 0.15, Math.max(a.x1 + 0.6, last.geom.x + last.headW), a.y + 0.15, 0.12, 'hyph'));
+          else rowsOut[a.k][r].s.push(line(a.x1 + 0.2, a.y + 0.15, systems[a.k].x1 - 0.3, a.y + 0.15, 0.12, 'hyph'));
+        }
+        return;
+      }
       if (!a.h) return;
       const b = seq[i + 1];
       let xa = a.x1 + 0.25, xb;
@@ -1171,6 +1374,18 @@ export function layoutScore(score0, opts = {}) {
     }
   }
 
+  // f2. ペダル（線）：└──────┘
+  for (const it of spanList.filter(x => x.sp.k === 'pedL')) {
+    for (const sg of segmentsOf(it)) {
+      const top = Math.max(4.6, skyBot(sg.k, it.r, sg.xa, sg.xb)) + 0.8;
+      const yl = top + 1.3;
+      const d = `M${f(sg.xa)} ${f(sg.first ? top : yl)}V${f(yl)}H${f(sg.xb + 0.6)}${sg.last ? `V${f(top)}` : ''}`;
+      rowsOut[sg.k][it.r].s.push(`<g class="mk" data-id="${it.key}"><path class="tline" d="${d}" stroke-width="0.15" fill="none"/></g>`);
+      box(sg.k, it.r, sg.xa, sg.xb + 0.6, top, yl + 0.3);
+      addMark({ key: it.key, ref: { type: 'span', p: it.row.p, s: it.row.s, m: it.m, idx: it.idx }, k: sg.k, r: it.r, x0: sg.xa - 0.3, x1: sg.xb + 0.9, y0: top - 0.2, y1: yl + 0.5 });
+    }
+  }
+
   // g. コードネーム：段ごとに、その譜表のいちばん上にそろえる
   const chordBase = {};
   for (const it of chordItems) {
@@ -1185,6 +1400,54 @@ export function layoutScore(score0, opts = {}) {
     addMark({ key: it.key, ref: it.ref, k: it.k, r: it.r, x0: it.x - 0.2, x1: it.x + c.w + 0.2, y0: y - 2.4, y1: y + 0.5 });
   }
   for (const it of chordItems) { const y = chordBase[`${it.k}:${it.r}`]; box(it.k, it.r, it.x, it.x + chordWidth(it.d.text), y - 2.3, y + 0.4); }
+  // g2. ギターのフレット図（コードネームのさらに上。段ごとに高さをそろえる）
+  const fretBase = {};
+  for (const it of fretItems) {
+    const id = `${it.k}:${it.r}`;
+    if (fretBase[id] == null) { const sy = systems[it.k]; fretBase[id] = Math.min(-1.2, skyTop(it.k, it.r, sy.x0, sy.x1)) - 0.8; }
+  }
+  for (const it of fretItems) {
+    const shape = fretShape(it.d.text);
+    const yb = fretBase[`${it.k}:${it.r}`];
+    const fs = fretSvg(shape, it.x, yb, it.d.text);
+    rowsOut[it.k][it.r].s.push(`<g class="mk fret" data-id="${it.key}">${fs.svg}</g>`);
+    ext(it.k, it.r, yb - fs.h, 4);
+    addMark({ key: it.key, ref: it.ref, k: it.k, r: it.r, x0: it.x - 0.4, x1: it.x + fs.w + 0.4, y0: yb - fs.h, y1: yb + 0.3 });
+  }
+  // shape = '320003' のような6弦→1弦のフレット。分からないコードは名前だけ
+  function fretSvg(shape, x, yBot, name) {
+    const parts = [];
+    const sp = 0.55, fsp = 0.72, nf = 4;
+    if (!shape) { parts.push(text(name, x, yBot, CHORD)); return { svg: parts.join(''), w: measureText(name, CHORD), h: 2.4 }; }
+    const fr = [...shape].map(c => (c === 'x' ? -1 : parseInt(c, 36)));
+    const played = fr.filter(v => v > 0);
+    const maxF = Math.max(0, ...played), minF = played.length ? Math.min(...played) : 1;
+    const base = maxF > nf ? minF : 1;
+    const ns = fr.length, w = (ns - 1) * sp, h = nf * fsp;
+    const top = yBot - h;
+    let d = '';
+    for (let i = 0; i < ns; i++) d += `M${f(x + i * sp)} ${f(top)}V${f(yBot)}`;
+    for (let j = 0; j <= nf; j++) d += `M${f(x)} ${f(top + j * fsp)}H${f(x + w)}`;
+    parts.push(`<path class="fretgrid" d="${d}" stroke-width="0.07" fill="none"/>`);
+    if (base === 1) parts.push(line(x, top - 0.08, x + w, top - 0.08, 0.22, 'fretnut'));
+    else parts.push(text(base + 'fr', x + w + 0.35, top + fsp * 0.8, 1.2));
+    // セーハ（同じフレットを3本以上の弦で押さえる）
+    const cnt = played.filter(v => v === minF).length;
+    if (cnt >= 3 && fr[0] === minF || cnt >= 4) {
+      const i0 = fr.findIndex(v => v === minF), i1 = fr.length - 1 - [...fr].reverse().findIndex(v => v === minF);
+      const cy = top + (minF - base + 0.5) * fsp;
+      parts.push(`<rect x="${f(x + i0 * sp - 0.22)}" y="${f(cy - 0.22)}" width="${f((i1 - i0) * sp + 0.44)}" height="0.44" rx="0.22" stroke="none"/>`);
+    }
+    fr.forEach((v, i) => {
+      const cx = x + i * sp;
+      if (v < 0) parts.push(text('×', cx, top - 0.3, 1.0, ' text-anchor="middle" font-family="Arial,Helvetica,sans-serif"'));
+      else if (v === 0) parts.push(`<circle cx="${f(cx)}" cy="${f(top - 0.55)}" r="0.2" stroke-width="0.08" fill="none"/>`);
+      else parts.push(`<circle cx="${f(cx)}" cy="${f(top + (v - base + 0.5) * fsp)}" r="0.21" stroke="none"/>`);
+    });
+    const c = chordSvg(name, x + w / 2 - chordWidth(name) / 2, top - 1.15);
+    parts.push(c.svg);
+    return { svg: parts.join(''), w: Math.max(w, c.w), h: h + 3.4 };
+  }
   function chordWidth(t) { return chordSvg(t, 0, 0).w; }
   // C, F♯m7, B♭maj7/D …（♯♭ は楽譜フォントの記号で）
   function chordSvg(t, x, y) {
@@ -1204,7 +1467,8 @@ export function layoutScore(score0, opts = {}) {
     return { svg: out.join(''), w: xx - x };
   }
 
-  // h. 段全体の記号（いちばん上の譜表の上）：反復のカッコ・セーニョ・コーダ・D.C. など・テンポ・小節番号
+  // h. 段全体の記号（いちばん上の譜表の上）：反復のカッコ・セーニョ・コーダ・D.C. など・テンポ・練習番号・小節番号
+  const REH = rehearsalLabels(score);
   systems.forEach((sy, k) => {
     const out = rowsOut[k][0].s;
     const r = 0;
@@ -1255,25 +1519,61 @@ export function layoutScore(score0, opts = {}) {
       if (ms.toCoda) put('toCoda', (xa, bot) => ({ svg: text('To Coda', xa, bot - 0.4, 2.2, ' font-style="italic" font-weight="700"') + `<text class="g" x="${f(xa + measureText('To Coda ', 2.2))}" y="${f(bot - 0.45)}" style="font-size:2.6px">${G.coda.c}</text>`, h: 2.4 }), measureText('To Coda ', 2.2) + gw('coda') * 0.65 + 0.2, true);
       if (ms.jump && JUMPS[ms.jump]) put('jump', word(JUMPS[ms.jump].text), measureText(JUMPS[ms.jump].text, 2.2) + 0.2, true);
     });
-    // テンポ
+    // テンポ（拍の単位は 4分音符のほか、2分・8分・付点も）
     sy.ms.forEach((m, idx) => {
       const tp = score.measures[m].tempo;
       if (!tp || (MS[m].geo.grp && m !== MS[m].geo.grp.first)) return;
       const x = (idx === 0 ? sy.x0 + sy.hdr : MS[m].geo.x0) + 0.3;
       const tw = (tp.text ? measureText(tp.text + ' ', 2.2) : 0);
-      const w = tw + 1.3 + measureText(' = ' + tp.bpm, 2.2);
+      const ug = { half: 'metNoteHalfUp', eighth: 'metNote8thUp', halfDot: 'metNoteHalfUp', quarterDot: 'metNoteQuarterUp', eighthDot: 'metNote8thUp' }[tp.unit] || 'metNoteQuarterUp';
+      const dot = /Dot$/.test(tp.unit || '');
+      const showBpm = !tp.hideBpm || !tp.text;
+      const nw = showBpm ? 1.3 + (dot ? 0.5 : 0) : 0;
+      const w = tw + nw + (showBpm ? measureText(' = ' + tp.bpm, 2.2) : 0);
       const y = Math.min(-2.5, skyTop(k, r, x, x + w) - 1.0);
       const label = tp.text ? esc(tp.text) + ' ' : '';
-      out.push(`<g class="tempo"><text class="t tempo-t" x="${f(x)}" y="${f(y)}" font-size="2.2">${label}</text>` +
-        `<text class="g" x="${f(x + tw)}" y="${f(y)}" style="font-size:2.6px">${G.metNoteQuarterUp.c}</text>` +
-        `<text class="t tempo-t" x="${f(x + tw + 1.3)}" y="${f(y)}" font-size="2.2"> = ${tp.bpm}</text></g>`);
+      const key = `m:${m}:tempo`;
+      out.push(`<g class="tempo mk" data-id="${key}"><text class="t tempo-t" x="${f(x)}" y="${f(y)}" font-size="2.2">${label}</text>` +
+        (showBpm ? `<text class="g" x="${f(x + tw)}" y="${f(y)}" style="font-size:2.6px">${G[ug].c}${dot ? G.metAugmentationDot.c : ''}</text>` +
+        `<text class="t tempo-t" x="${f(x + tw + nw)}" y="${f(y)}" font-size="2.2"> = ${tp.bpm}</text>` : '') + '</g>');
       box(k, r, x, x + w, y - 2.5, y + 0.3);
+      addMark({ key, ref: { type: 'meas', m, what: 'tempo' }, k, r, x0: x - 0.2, x1: x + w + 0.2, y0: y - 2.5, y1: y + 0.4 });
     });
-    if (k > 0) {
-      const y = Math.min(-1.4, skyTop(k, r, sy.x0, sy.x0 + 2) - 0.4);
-      out.push(`<text class="t mnum" x="${f(sy.x0 + 0.2)}" y="${f(y)}" font-size="1.6">${sy.first + 1}</text>`);
+    // システムテキスト（全パート共通の文字：段のいちばん上に）
+    sy.ms.forEach((m) => (score.measures[m].stext || []).forEach((d, idx) => {
+      const x = xAt(m, d.t);
+      const w = measureText(d.text, TXT);
+      const bot = Math.min(-0.8, skyTop(k, r, x, x + w)) - 0.5;
+      const key = `x:${m}:${idx}`;
+      out.push(`<g class="mk" data-id="${key}">${text(d.text, x, bot - 0.45, TXT, d.it ? ' font-style="italic"' : ' font-weight="600"')}</g>`);
+      box(k, r, x, x + w, bot - 2.2, bot);
+      addMark({ key, ref: { type: 'stext', m, idx }, k, r, x0: x - 0.2, x1: x + w + 0.2, y0: bot - 2.4, y1: bot + 0.2 });
+    }));
+    // 練習番号（四角で囲んだ A, B … / 小節番号）
+    sy.ms.forEach((m, idx) => {
+      const lb = REH[m];
+      if (lb == null) return;
+      const x = (idx === 0 ? sy.x0 + sy.hdr - 1.2 : MS[m].geo.x0) - 0.3;
+      const w = measureText(lb, 2.4) + 1.0;
+      const bot = Math.min(-1.2, skyTop(k, r, x, x + w)) - 0.6;
+      const key = `m:${m}:reh`;
+      out.push(`<g class="mk reh" data-id="${key}"><rect x="${f(x)}" y="${f(bot - 3)}" width="${f(w)}" height="3" stroke-width="0.16" fill="none"/>${text(lb, x + 0.5, bot - 0.75, 2.4, ' font-weight="700" font-family="Arial,Helvetica,sans-serif"')}</g>`);
+      box(k, r, x, x + w, bot - 3.1, bot);
+      addMark({ key, ref: { type: 'meas', m, what: 'reh' }, k, r, x0: x - 0.2, x1: x + w + 0.2, y0: bot - 3.3, y1: bot + 0.2 });
+    });
+    // 小節番号：settings.measureNumbers = system（段の頭・初期値）/ every（毎小節）/ n5・n10（5・10小節ごと）/ none
+    // 1段スクロールでは段の頭が1つしかないので、毎小節に番号を出す
+    const MN = cont && !score.settings.measureNumbers ? 'every' : score.settings.measureNumbers || 'system';
+    sy.ms.forEach((m, idx) => {
+      if (MN === 'none' || m === 0 || (MS[m].geo.grp && m !== MS[m].geo.grp.first)) return;
+      const n = m + 1;
+      const show = MN === 'every' || (MN === 'system' && idx === 0) || (MN === 'n5' && n % 5 === 0) || (MN === 'n10' && n % 10 === 0);
+      if (!show) return;
+      const x = idx === 0 ? sy.x0 + 0.2 : MS[m].geo.x0 + 0.15;
+      const y = Math.min(-1.4, skyTop(k, r, x, x + 2) - 0.4);
+      out.push(`<text class="t mnum" x="${f(x)}" y="${f(y)}" font-size="1.6">${n}</text>`);
       ext(k, r, y - 1.6, 4);
-    }
+    });
   });
 
   // ═════════ 6. 縦の配置とページ割り ═════════
@@ -1312,13 +1612,13 @@ export function layoutScore(score0, opts = {}) {
     else if (meta.lyricist) head.push(`<text class="t lyricist" x="${f(mg.l)}" y="${f(y)}" font-size="2.2">${esc(meta.lyricist)}</text>`);
     if (meta.arranger) { y += 2.8; head.push(`<text class="t arranger" x="${f(right)}" y="${f(y)}" font-size="2.0" text-anchor="end">${esc(meta.arranger)}</text>`); }
   }
-  cur.head = head;
-  let cy = y + (head.length ? 5 : 2);
+  cur.head = cont ? [] : head;
+  let cy = cont ? mg.t + 4 : y + (head.length ? 5 : 2);
   systems.forEach((sy, k) => {
     const blk = sysBlocks[k];
     const prevSys = systems[k - 1];
     const forcedPage = prevSys && !showParts && score.measures[prevSys.ms[prevSys.ms.length - 1]].pageBreak;
-    if (cur.sys.length && (cy + blk.height > contentBottom || forcedPage)) { newPage(); cy = mg.t + 2; }
+    if (!cont && cur.sys.length && (cy + blk.height > contentBottom || forcedPage)) { newPage(); cy = mg.t + 2; }
     if (score.measures[sy.first]?.sysSpace) cy += score.measures[sy.first].sysSpace;
     cur.sys.push({ k, y: cy });
     cy += blk.height + sysGap;
@@ -1337,14 +1637,16 @@ export function layoutScore(score0, opts = {}) {
     pg.sys.forEach((s, i) => (s.y += add * i));
   });
 
+  if (cont) pageH = cy - sysGap + mg.b + 2;
   // ── SVG を組み立てる ──
   const sysInfo = [];
   const pageSvgs = pages.map((pg, pi) => {
     const parts = [];
     parts.push(`<rect class="paper" x="0" y="0" width="${f(pageW)}" height="${f(pageH)}"/>`);
     if (pi === 0) parts.push(...pg.head);
+    else if (cont || score.settings.pageNumbers === 'none') { /* ページ番号なし */ } else if (score.settings.pageNumbers === 'center') parts.push(`<text class="t pnum" x="${f(pageW / 2)}" y="${f(pageH - mg.b / 2)}" font-size="2" text-anchor="middle">${pi + 1}</text>`);
     else parts.push(`<text class="t pnum" x="${f(pi % 2 ? right : mg.l)}" y="${f(mg.t - 2)}" font-size="2" text-anchor="${pi % 2 ? 'end' : 'start'}">${pi + 1}</text>`);
-    if (pi === 0 && meta.copyright) parts.push(`<text class="t copyright" x="${f(pageW / 2)}" y="${f(pageH - mg.b / 2)}" font-size="1.6" text-anchor="middle">${esc(meta.copyright)}</text>`);
+    if (pi === 0 && meta.copyright && !cont) parts.push(`<text class="t copyright" x="${f(pageW / 2)}" y="${f(pageH - mg.b / 2)}" font-size="1.6" text-anchor="middle">${esc(meta.copyright)}</text>`);
     for (const ps of pg.sys) {
       const sy = systems[ps.k];
       const blk = sysBlocks[ps.k];
@@ -1387,6 +1689,20 @@ export function layoutScore(score0, opts = {}) {
         } else if (bl === 'double') {
           parts.push(line(x - THIN / 2, y1, x - THIN / 2, y2, THIN, 'barline'));
           parts.push(line(x - THIN * 1.5 - 0.4, y1, x - THIN * 1.5 - 0.4, y2, THIN, 'barline'));
+        } else if (bl === 'dashed' || bl === 'dotted') {
+          // 譜表ごとに描く（譜表の間はつながない）
+          for (const r of rs) parts.push(line(x - THIN / 2, staffYs[r], x - THIN / 2, staffYs[r] + rowH[r], THIN * 1.2, 'barline', bl === 'dashed' ? ' stroke-dasharray="0.5 0.4"' : ' stroke-dasharray="0.15 0.35" stroke-linecap="round"'));
+        } else if (bl === 'heavy') {
+          parts.push(line(x - THICK / 2, y1, x - THICK / 2, y2, THICK, 'barline'));
+        } else if (bl === 'heavyHeavy') {
+          parts.push(line(x - THICK / 2, y1, x - THICK / 2, y2, THICK, 'barline'));
+          parts.push(line(x - THICK * 1.5 - 0.4, y1, x - THICK * 1.5 - 0.4, y2, THICK, 'barline'));
+        } else if (bl === 'tick') {
+          for (const r of rs) parts.push(line(x - THIN / 2, staffYs[r] - 0.5, x - THIN / 2, staffYs[r] + 0.5, THIN, 'barline'));
+        } else if (bl === 'short') {
+          for (const r of rs) parts.push(line(x - THIN / 2, staffYs[r] + 1, x - THIN / 2, staffYs[r] + rowH[r] - 1, THIN, 'barline'));
+        } else if (bl === 'none') {
+          // 何も描かない
         } else parts.push(line(x - THIN / 2, y1, x - THIN / 2, y2, THIN, 'barline'));
       }
     });
@@ -1429,7 +1745,7 @@ export function layoutScore(score0, opts = {}) {
     for (const p in partRows) {
       const rs = partRows[p];
       const part = score.parts[p];
-      const name = k === 0 ? part.name : (multiPart ? part.abbr : '');
+      const name = INAMES === 'none' ? '' : k === 0 ? part.name : INAMES === 'full' ? part.name : INAMES === 'abbr' && multiPart ? part.abbr : '';
       if (!name) continue;
       const cyy = (staffYs[rs[0]] + staffYs[rs[rs.length - 1]] + rowH[rs[rs.length - 1]]) / 2 + nameSize * 0.35;
       parts.push(`<text class="t iname" x="${f(bx - 0.3)}" y="${f(cyy)}" font-size="${nameSize}" text-anchor="end">${esc(name)}</text>`);
@@ -1448,7 +1764,7 @@ export function layoutScore(score0, opts = {}) {
   for (const mk of marks) { const si = sysInfo[mk.k]; mk.page = si.page; mk.oy = si.staffYs[mk.r]; }
   return {
     pages: pageSvgs, systems: sysInfo, measures, rows: SL.map((row, r) => ({ p: row.p, s: row.s, kind: rowKind[r], h: rowH[r], src: tabSrc[r], tuning: row.staff.tuning || null })), clefs, evGeom, marks, attrs: A, pageW, pageH,
-    fifthsAt: fifthsR, rowTrans, partView: !!showParts, transposed: !!opts.transposed,
+    fifthsAt: fifthsR, rowTrans, partView: !!showParts, transposed: !!opts.transposed, continuous: cont,
   };
 }
 

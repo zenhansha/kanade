@@ -36,15 +36,26 @@ export class ScoreView {
 
   // 画面に合わせた倍率。基本はページの幅に合わせるが、PC の横長の大きな画面では
   // 1ページだけだと大きすぎるので、100% 以上を保てる範囲でページを横に並べる（見開き表示）
+  // Phase 4：ページの並べ方ごとに合わせ方を変える
+  //   vertical（縦・Word と同じ）= ページの幅に合わせる。PC の大きな画面では大きくなりすぎないよう 125% まで
+  //   horizontal（横）= ページ全体が縦に入る大きさ / spread（見開き）= 2ページが横に入る大きさ
+  //   scroll（1段スクロール）= 段の高さが画面に入る大きさ
   fitZoom() {
     const s = this.app.score.settings;
-    const pagePx = s.page.w * MM_PX;
-    const avail = this.scroller.clientWidth - 72; // 左右の余白＋縦スクロールバーぶん
-    let z = avail / pagePx;
-    for (let n = 2; n <= 4; n++) {
-      const zn = (avail - PAGE_GAP * (n - 1)) / (n * pagePx);
-      if (zn < 1) break;
-      z = zn;
+    const arr = this.app.viewOpts?.arrange || 'vertical';
+    const pagePx = s.page.w * MM_PX, pageHPx = s.page.h * MM_PX;
+    const availW = this.scroller.clientWidth - 72; // 左右の余白＋縦スクロールバーぶん
+    const availH = this.scroller.clientHeight - 64;
+    const fine = matchMedia('(pointer: fine)').matches;
+    let z;
+    if (arr === 'horizontal') z = availH / pageHPx;
+    else if (arr === 'spread') z = (availW - PAGE_GAP) / (2 * pagePx);
+    else if (arr === 'scroll') {
+      const L = this.L, h = L && L.continuous ? L.pageH * (s.staffMm / 4) * MM_PX : pageHPx * 0.3;
+      z = Math.min(1.6, availH / Math.max(1, h));
+    } else {
+      z = availW / pagePx;
+      if (fine) z = Math.min(z, 1.25);
     }
     return Math.max(0.4, Math.min(3, z));
   }

@@ -197,7 +197,9 @@ export function refitAll(score) {
 }
 
 // ドラムの種類（drum）と TAB の弦の指定（str）は音といっしょに持ち歩く
-const extra = (n) => ({ ...(n.drum ? { drum: n.drum } : {}), ...(n.str ? { str: n.str } : {}) });
+// 音の高さ以外に音が持っているもの（ドラムの種類・弦・符頭の形・運指 …）。音価を変えても残す
+const NOTE_KEYS = ['drum', 'str', 'strMark', 'head', 'paren', 'fing', 'acc'];
+const extra = (n) => Object.fromEntries(NOTE_KEYS.filter(k => n[k] != null && n[k] !== false).map(k => [k, n[k]]));
 function sortNotes(notes) { notes.sort((a, b) => diatonic(a) - diatonic(b) || (a.alter || 0) - (b.alter || 0)); return notes; }
 
 // ───────── 音符入力 ─────────
