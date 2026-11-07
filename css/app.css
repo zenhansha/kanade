@@ -46,7 +46,7 @@
 }
 
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overscroll-behavior: none; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overscroll-behavior: none; touch-action: manipulation; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", "Segoe UI", sans-serif;
   font-size: 15px; -webkit-text-size-adjust: 100%; -webkit-user-select: none; user-select: none;
@@ -95,6 +95,8 @@ input, select, textarea { font: inherit; color: inherit; -webkit-user-select: te
 #pages[data-arrange="spread"] { display: grid; grid-template-columns: repeat(2, var(--pw, 800px)); justify-content: center; align-content: start; }
 #pages[data-arrange="scroll"] { align-items: flex-start; padding: 24px 32px 60px; width: max-content; }
 body.mode-input #pages { cursor: crosshair; }
+/* iPad の入力モード：1本指は入力、2本指の移動とピンチは自分で動かす */
+body.mode-input #scroller { touch-action: none; }
 #app.dropping #scroller { outline: 3px dashed var(--accent); outline-offset: -8px; background: var(--accent-soft); }
 .pagewrap { position: relative; background: var(--paper); box-shadow: var(--shadow); flex: none; border-radius: 2px; }
 .pagewrap > svg.page { display: block; width: 100%; height: 100%; }
@@ -143,7 +145,15 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
 .voices { display: flex; gap: 3px; }
 
 /* ── 画面鍵盤 ── */
-#piano { flex: none; height: 150px; background: var(--chrome); border-top: 1px solid var(--line); display: flex; align-items: stretch; padding: 6px 6px calc(6px + var(--safe-b)); gap: 6px; }
+#piano { flex: none; height: 200px; background: var(--chrome); border-top: 1px solid var(--line); display: flex; flex-direction: column; padding: 6px 6px calc(6px + var(--safe-b)); gap: 6px; touch-action: none; }
+.pk-bar { flex: none; display: flex; gap: 4px; height: 42px; }
+.pk-bar button { width: 46px; flex: none; border: 1px solid var(--line); background: var(--chrome-2); border-radius: 8px; cursor: pointer; padding: 0; display: flex; align-items: center; justify-content: center; }
+.pk-bar button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.pk-bar .gsvg { height: 26px; }
+.pk-ico { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.pk-gap { flex: 1; }
+.pk-main { flex: 1; min-height: 0; display: flex; align-items: stretch; gap: 6px; }
+.pk-side button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 #piano[hidden] { display: none; }
 .pk-side { display: flex; flex-direction: column; gap: 6px; width: 54px; flex: none; }
 .pk-side button { flex: 1; border: 1px solid var(--line); background: var(--chrome-2); border-radius: 8px; font-weight: 600; cursor: pointer; }
@@ -172,6 +182,9 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
 .field input, .field select { height: 42px; border: 1px solid var(--line); border-radius: 9px; padding: 0 12px; background: var(--chrome-2); }
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .row > .field { flex: 1; min-width: 140px; }
+.tap-tempo { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 54px; margin: 0 0 10px; padding: 0 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--chrome-2); color: inherit; font-size: 13px; cursor: pointer; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
+.tap-tempo b { font-size: 16px; }
+.tap-tempo.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { height: 36px; padding: 0 12px; border-radius: 18px; border: 1px solid var(--line); background: var(--chrome-2); cursor: pointer; font-size: 14px; }
 .chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }

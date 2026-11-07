@@ -3,8 +3,8 @@
 // ・iPad の Safari は Web MIDI 非対応。App Store の「Web MIDI Browser」などの
 //   Web MIDI 対応ブラウザでこのアプリを開くと使える
 export class MidiInput {
-  constructor({ onNoteOn, onNoteOff, onStatus }) {
-    this.onNoteOn = onNoteOn; this.onNoteOff = onNoteOff; this.onStatus = onStatus;
+  constructor({ onNoteOn, onNoteOff, onStatus, onPedal }) {
+    this.onNoteOn = onNoteOn; this.onNoteOff = onNoteOff; this.onStatus = onStatus; this.onPedal = onPedal;
     this.access = null;
     this.held = new Set();
     this.devices = [];
@@ -47,6 +47,8 @@ export class MidiInput {
     } else if (cmd === 0x80 || (cmd === 0x90 && d2 === 0)) {
       this.held.delete(d1);
       if (this.onNoteOff) this.onNoteOff(d1, stamp);
+    } else if (cmd === 0xb0 && d1 === 64 && this.onPedal) {
+      this.onPedal(d2 >= 64); // サステインペダル（CC64）
     }
   }
 

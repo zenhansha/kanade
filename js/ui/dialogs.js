@@ -292,9 +292,33 @@ export class Dialogs {
         <label class="field"><span>＝（1分間にいくつ）</span><input id="tpB" type="number" inputmode="numeric" value="${ms.tempo?.bpm ?? cur}" min="20" max="400"></label></div>
         <div class="row">
         <label class="field"><span>表示する文字（任意）</span><input id="tpT" value="${esc(ms.tempo?.text || '')}" placeholder="Allegro など"></label></div>
+        <button type="button" class="tap-tempo" id="tpTap"><b>タップ</b><span id="tpTapV">拍に合わせて 2 回以上たたく（T キーでも）</span></button>
         <label class="ck" style="margin:0 0 10px"><input type="checkbox" id="tpH"${ms.tempo?.hideBpm ? ' checked' : ''}><span>文字だけ表示する（数字は出さない・再生には使う）</span></label>
         <div class="chips">${[['Largo', 50], ['Adagio', 66], ['Andante', 80], ['Moderato', 100], ['Allegretto', 112], ['Allegro', 132], ['Presto', 168]].map(([n, b]) => `<button class="chip" data-n="${n}" data-b="${b}">${n} ${b}</button>`).join('')}</div>`,
-      onOpen: (bd) => { bd.querySelector('.chips').onclick = (e) => { const c = e.target.closest('.chip'); if (!c) return; bd.querySelector('#tpB').value = c.dataset.b; bd.querySelector('#tpT').value = c.dataset.n; }; },
+      onOpen: (bd) => {
+        bd.querySelector('.chips').onclick = (e) => { const c = e.target.closest('.chip'); if (!c) return; bd.querySelector('#tpB').value = c.dataset.b; bd.querySelector('#tpT').value = c.dataset.n; };
+        // タップテンポ：たたいた間隔の平均から決める（3秒あいたら数え直し。選んでいる「拍の単位」を1拍として数える）
+        const btn = bd.querySelector('#tpTap'), out = bd.querySelector('#tpTapV');
+        let taps = [];
+        const tap = (at) => {
+          if (taps.length && at - taps[taps.length - 1] > 3000) taps = [];
+          taps.push(at);
+          if (taps.length > 9) taps.shift();
+          btn.classList.add('on'); setTimeout(() => btn.classList.remove('on'), 90);
+          if (taps.length < 2) { out.textContent = 'そのまま続けて…'; return; }
+          const bpm = Math.round((60000 * (taps.length - 1)) / (taps[taps.length - 1] - taps[0]));
+          if (bpm < 20 || bpm > 400) return;
+          bd.querySelector('#tpB').value = bpm;
+          out.textContent = `＝ ${bpm}（${taps.length} 回の平均）`;
+        };
+        btn.addEventListener('pointerdown', (e) => { e.preventDefault(); btn.focus(); tap(e.timeStamp); });
+        bd.addEventListener('keydown', (e) => {
+          const onField = /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName);
+          if (e.repeat || onField || !(e.key === 't' || e.key === 'T' || (e.target === btn && (e.key === ' ' || e.key === 'Enter')))) return;
+          e.preventDefault(); e.stopPropagation(); tap(e.timeStamp);
+        });
+        btn.focus();
+      },
       buttons: [
         ...(m > 0 && ms.tempo ? [{ label: 'この変更を削除', cls: 'danger', onClick: () => a.edit('テンポ削除', () => { delete a.score.measures[m].tempo; }) }] : []),
         { label: 'キャンセル' },
@@ -537,7 +561,7 @@ export class Dialogs {
       body: `<div class="help">
         <p><b>2つのモード</b>があります。<b>入力モード</b>（ピンクのカーソル）で音を入れ、<b>選択モード</b>（青）で直します。N キーかパレット左端で切り替えます。</p>
         <h3>音を入れる（入力モード）</h3>
-        <p>・<b>タップ／Apple Pencil</b>：五線の上をタップすると、その高さ・その位置に、選んでいる音価で入ります。Pencil や マウスなら押したまま動かすとゴースト音符で確認できます。指でなぞるとスクロールです。<br>
+        <p>・<b>タップ／Apple Pencil</b>：五線の上をタップすると、その高さ・その位置に、選んでいる音価で入ります。押したまま動かすと、ゴースト音符と音で確認できます。<b>入力モードでは、1本指で入力・2本指で移動とピンチ拡大・2本指タップで元に戻す</b>（選択モードは1本指でスクロール）。<br>
         ・<b>キーボード</b>：数字で音価 → A〜G で音名。前の音に一番近いオクターブに入ります。<br>
         ・<b>MIDI キーボード／画面鍵盤</b>：弾いた音がそのまま入ります。押さえたまま弾くと和音。</p>
         <h3>直す（選択モード）</h3>
@@ -572,6 +596,14 @@ export class Dialogs {
         ・<b>MuseScore と同じ便利な操作</b>：R でくり返し、Shift+X で符尾の反転、{ } で小節の幅、Ctrl+G で小節へ移動、音程を重ねる（ツール）、声部の入れ替え、スラッシュで埋める、ループ再生と再生の速さ（再生タブ）、コードネームを鳴らす。<br>
         ・<b>拍子の変更</b>：音符を新しい小節線で組み直します（Finale の「小節の再構成」）。はみ出す音はタイで次の小節へ。<br>
         ・<b>書き出し</b>：MusicXML・MIDI・WAV に加えて、PNG・SVG の画像も。</p>
+        <h3>iPad の指の操作</h3>
+        <p>・<b>入力モード</b>：1本指で入力（押した音がすぐ鳴る。すべらせると高さを変えられ、五線の外で離すと取り消し）、<b>2本指で移動</b>、<b>ピンチで拡大</b>、<b>2本指タップで元に戻す</b>。<br>
+        ・<b>画面鍵盤</b>の上の帯で、音価・付点・休符・タイ・前後へ移動・削除ができます。<br>
+        ・右上のボタンで<b>全画面</b>になります。ホーム画面に追加すると、最初から全画面で開けます。</p>
+        <h3>音</h3>
+        <p>・ピアノは強さごとに録音した音源で鳴ります（初回だけ読み込みます）。「再生」タブの<b>響き</b>で、ホール・部屋・なしを選べます。<br>
+        ・テンポの画面の<b>タップ</b>で、拍に合わせてたたいてテンポを決められます（T キーでも）。<br>
+        ・ピアノの音：Salamander Grand Piano（作者 Alexander Holm、CC BY 3.0）。</p>
         <h3>PC（マウス）で使うとき</h3>
         <p>・<b>ドラッグ</b>で小節の範囲選択、<b>右クリック</b>でその場のメニュー（コピー・移調・拍子や調の変更など）、<b>ダブルクリック</b>でそこから入力。<br>
         ・<b>Ctrl+ホイール</b>で拡大縮小、<b>Ctrl+0</b> で画面に合わせる（大きな画面ではページを横に並べます）。<br>

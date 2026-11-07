@@ -18,6 +18,7 @@ import { measureAttrs, INST } from '../core/score.js';
 import { positions } from '../core/edit.js';
 import { playOrder, DYNAMICS, SPANS, spanEnd, ARTICS, isFermata, parseChord } from '../core/marks.js';
 import { DRUM, drumOf } from '../core/perc.js';
+import { PIANO_SF } from './piano.js';
 
 const DEFAULT_VEL = 0.7;
 const RES = TPQ / 12; // テンポ表のきざみ（ティック）
@@ -168,7 +169,7 @@ export function buildPerformance(score, opts = {}) {
   };
 
   const anySolo = score.parts.some(p => p.mix?.solo);
-  const notes = [];
+  const notes = [], pedals = [];
   let nk = 0;
   score.parts.forEach((part, p) => {
     if (anySolo ? !part.mix?.solo : part.mix?.mute) return;
@@ -186,13 +187,19 @@ export function buildPerformance(score, opts = {}) {
         const e = spanEnd(m, sp);
         if (e.m >= A.length) return;
         const endEv = eventAt(st, e.m, sp.v, e.t);
-        const item = { a: absT(m, sp.t), b: absT(e.m, endEv ? endEv.end : e.t + TPQ), m, e: { m: e.m, t: endEv ? endEv.end : e.t + TPQ } };
+        const item = { a: absT(m, sp.t), b: absT(e.m, endEv ? endEv.end : e.t + TPQ), m, t: sp.t, e: { m: e.m, t: endEv ? endEv.end : e.t + TPQ } };
         if (SPANS[sp.k]?.shift) shifts.push({ ...item, shift: SPANS[sp.k].shift });
         if (sp.k === 'ped' || sp.k === 'pedL') peds.push(item);
         if (sp.k === 'trill') trills.push(item);
         if (sp.k === 'gliss') glisses.push({ a: absT(m, sp.t), to: endEv && !endEv.ev.rest ? endEv.ev.notes[endEv.ev.notes.length - 1] : null });
       }));
       const inSpan = (list, at) => list.find(x => at >= x.a && at < x.b);
+      // ピアノのペダルの動き（踏む音・離す音、弦の共鳴の入り切り）
+      if (inst.sf === PIANO_SF && peds.length) order.forEach((m, i) => peds.forEach(x => {
+        if (x.m !== m) return;
+        pedals.push({ start: tickToSec(i, x.t), pedal: 'down', p, s });
+        pedals.push({ start: secAhead(i, x.e.m, x.e.t) - 0.02, pedal: 'up', p, s });
+      }));
       const maxV = Math.max(...st.measures.map(sm => sm.voices.length));
       for (let v = 0; v < maxV; v++) {
         let pending = new Map(); // midi → 伸ばし中の音（タイ）
@@ -263,7 +270,7 @@ export function buildPerformance(score, opts = {}) {
                   nn = { ...base, start: start + off, end: start + len, midi, vel, ids: [ev.id] };
                   notes.push(nn);
                 }
-                if (nn && ped) nn.end = Math.max(nn.end, secAhead(i, ped.e.m, ped.e.t) - 0.02);
+                if (nn && ped) { nn.end = Math.max(nn.end, secAhead(i, ped.e.m, ped.e.t) - 0.02); nn.ped = true; }
                 if (nn && n.tie) next.set(midi, nn);
               });
             }
@@ -315,7 +322,7 @@ export function buildPerformance(score, opts = {}) {
     if (i < 0) i = order.findIndex(x => x >= m);
     return i < 0 ? total : seqStart[i];
   };
-  return { notes, clicks, total, order, seqStart, tickToSec, secToPos, secOfMeasure, attrs: A, scale };
+  return { notes, pedals, clicks, total, order, seqStart, tickToSec, secToPos, secOfMeasure, attrs: A, scale };
 }
 
 // コードネーム → 鳴らす音（ルートを低く、その上に3和音か4和音。テンションは省略）
@@ -422,15 +429,18 @@ export class Player {
     this.stop(true);
     const ctx = this.synth.ensure();
     const perf = buildPerformance(score, opts);
-    if (opts.filter) perf.notes = perf.notes.filter(opts.filter);
+    if (opts.filter) { perf.notes = perf.notes.filter(opts.filter); perf.pedals = perf.pedals.filter(opts.filter); }
     this.perf = perf;
     this.opts = opts;
     // ミキサー（パートごとの音量・左右）
     score.parts.forEach((p, i) => this.synth.setChannel(i, p.mix?.vol ?? 0.8, p.mix?.pan ?? 0));
     // 使われている楽器の高音質サンプルを読み込み（初回だけ少し待つ。最大1.5秒）
     const sfs = [...new Set(score.parts.map(p => (INST[p.inst] || {}).sf).filter(Boolean))];
-    const loads = Promise.all(sfs.map(s => this.synth.loadSamples(s)));
-    await Promise.race([loads, new Promise(r => setTimeout(r, 1500))]);
+    const loads = Promise.all([...sfs.map(s => this.synth.loadSamples(s)), this.synth.loadPianoFor(perf.notes)]);
+    // ピアノの録音を初めて読むときは、もう少し待つ（読み込む前に鳴らすと簡易音色になってしまう）
+    const firstPiano = sfs.includes(PIANO_SF) && this.synth.useSamples && !this.synth.piano.ready;
+    if (firstPiano && this.onLoading) this.onLoading();
+    await Promise.race([loads, new Promise(r => setTimeout(r, firstPiano ? 6000 : 1500))]);
     const fromSec = perf.secOfMeasure(fromMeasure);
     this.fromSec = fromSec;
     // カウントイン：最初の小節の拍子・テンポで、指定した小節数ぶんクリックを先に鳴らす
@@ -448,7 +458,7 @@ export class Player {
     const pre = [];
     for (let k = 0; k < nBeats; k++) pre.push({ start: fromSec - countSec + k * beatSec, accent: k % Math.max(1, Math.round(a0.full / beatTicks(a0.time))) === 0, click: true });
     const qEnd = opts.loop ? perf.secOfMeasure(opts.loop.m2 + 1) : Infinity;
-    this.queue = [...pre, ...clicks, ...perf.notes.filter(n => n.start >= fromSec - 1e-6 && n.start < qEnd - 1e-6)].sort((a, b) => a.start - b.start);
+    this.queue = [...pre, ...clicks, ...perf.notes.filter(n => n.start >= fromSec - 1e-6 && n.start < qEnd - 1e-6), ...perf.pedals.filter(n => n.start >= fromSec - 1e-6 && n.start < qEnd - 1e-6)].sort((a, b) => a.start - b.start);
     // 外部 MIDI 音源：パートごとにチャンネル（ドラムは 10ch）と音色を送っておく
     this.chOf = [];
     if (this.midiOut?.out) {
@@ -487,13 +497,14 @@ export class Player {
       const n = this.queue[this.idx++];
       const when = this.t0 + (n.start - this.fromSec);
       if (n.click) { this.synth.click(when, n.accent); continue; }
+      if (n.pedal) { if (!this.midiOut?.out) this.synth.pedal(n.pedal, when, n.p); continue; }
       if (this.midiOut?.out) {
         const c = this.chOf[n.p] ?? 0, ms = (w) => performance.now() + (w - this.synth.now) * 1000;
         this.midiOut.send([0x90 | c, n.midi & 127, Math.max(1, Math.round((n.vel ?? DEFAULT_VEL) * 127))], ms(when));
         this.midiOut.send([0x80 | c, n.midi & 127, 64], ms(when + Math.max(0.04, n.end - n.start)));
         continue;
       }
-      this.synth.play({ midi: n.midi, program: n.program, sf: n.sf, drum: n.drum, ch: n.p, when, dur: Math.max(0.04, n.end - n.start), vel: n.vel ?? DEFAULT_VEL });
+      this.synth.play({ midi: n.midi, program: n.program, sf: n.sf, drum: n.drum, ch: n.p, when, dur: Math.max(0.04, n.end - n.start), vel: n.vel ?? DEFAULT_VEL, ped: n.ped });
     }
   }
 
@@ -512,13 +523,19 @@ export class Player {
 export async function renderWav(score, synth, SynthClass, onProgress) {
   const perf = buildPerformance(score);
   const rate = 44100;
-  const len = Math.ceil((perf.total + 2.5) * rate);
+  const len = Math.ceil((perf.total + 3.5) * rate);
   const off = new OfflineAudioContext(2, len, rate);
   const s2 = new SynthClass({ ctx: off, samplesFrom: synth });
   score.parts.forEach((p, i) => s2.setChannel(i, p.mix?.vol ?? 0.8, p.mix?.pan ?? 0));
   const sfs = [...new Set(score.parts.map(p => (INST[p.inst] || {}).sf).filter(Boolean))];
   await Promise.all(sfs.map(s => synth.loadSamples(s)));
-  for (const n of perf.notes) s2.play({ midi: n.midi, program: n.program, sf: n.sf, drum: n.drum, ch: n.p, when: n.start + 0.05, dur: Math.max(0.04, n.end - n.start), vel: n.vel ?? DEFAULT_VEL });
+  await synth.loadPianoFor(perf.notes);
+  if (synth.piano.extraJob) await synth.piano.extraJob;
+  const events = [...perf.notes, ...perf.pedals].sort((a, b) => a.start - b.start);
+  for (const n of events) {
+    if (n.pedal) s2.pedal(n.pedal, n.start + 0.05, n.p);
+    else s2.play({ midi: n.midi, program: n.program, sf: n.sf, drum: n.drum, ch: n.p, when: n.start + 0.05, dur: Math.max(0.04, n.end - n.start), vel: n.vel ?? DEFAULT_VEL, ped: n.ped });
+  }
   if (onProgress) onProgress(0.5);
   const buf = await off.startRendering();
   return encodeWav(buf);

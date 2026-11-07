@@ -13,6 +13,10 @@ import * as PC from '../js/core/perc.js';
 import { exportMidi, importMidi } from '../js/io/midifile.js';
 import { rebar } from '../js/core/rebar.js';
 import { SMUFL } from '../js/smufl.js';
+import { PIANO } from '../js/audio/pianodata.js';
+import { pianoPick, pianoRate, pianoGain, damperTau, PIANO_SF, PianoBank } from '../js/audio/piano.js';
+import { Recorder } from '../js/audio/recorder.js';
+import fs from 'node:fs';
 
 let pass = 0, fail = 0;
 const tests = [];
@@ -745,6 +749,87 @@ test('音符の設定（トグル）・連桁の指定・ストリームで書�
   MA.scaleDurations(sc, { m1: 0, m2: 0, staves: [[0, 0]] }, 2);
   const g = sc.parts[0].staves[0].measures.flatMap(sm => sm.voices[0]).find(e => !e.rest && e.notes[0].step === 'G');
   eq([g.trem, g.small], [1, true]);
+});
+
+test('ピアノ：全部の鍵に録音があり、ずらすのは ±1 半音まで', () => {
+  for (let m = 21; m <= 108; m++) {
+    const w = pianoPick(m, 0.7);
+    if (Math.abs(m - PIANO.midi[w.point]) > 1) throw new Error('遠すぎる ' + m);
+    eq(Math.abs(pianoRate(PIANO.midi[w.point], w.point) - 1) < 1e-9, true);
+  }
+  // 音源のファイルがそろっている
+  const dir = new URL('../sounds/piano/', import.meta.url);
+  for (const n of PIANO.names) {
+    for (const v of PIANO.layers) if (!fs.existsSync(new URL(n + 'v' + v + '.mp3', dir))) throw new Error('ファイルがない ' + n + 'v' + v);
+    if (!fs.existsSync(new URL('rel' + n + '.mp3', dir))) throw new Error('ファイルがない rel' + n);
+  }
+});
+
+test('ピアノ：強く弾くほど大きく、録音が切り替わるところで音量がとばない', () => {
+  const level = (vel) => { const w = pianoPick(60, vel); return 20 * Math.log10(pianoGain(w.v, w.layer)) + PIANO.layerDb[w.layer]; };
+  let prev = -Infinity, jump = 0;
+  for (let v = 0.1; v <= 1.0001; v += 0.01) {
+    const L = level(Math.min(1, v));
+    if (L < prev - 1e-6) throw new Error('強くしたのに小さくなった ' + v);
+    if (prev > -Infinity) jump = Math.max(jump, L - prev);
+    prev = L;
+  }
+  if (jump > 1) throw new Error('段差が大きい ' + jump);
+  // 強弱記号どうしの差がちゃんと聞こえる
+  if (level(0.9) - level(0.32) < 12) throw new Error('pp と ff の差が小さい');
+  // ppp は弱い録音、fff は強い録音を使う
+  eq([pianoPick(60, 0.15).layer, pianoPick(60, 1).layer], [0, PIANO.layers.length - 1]);
+  // 低い弦ほどダンパーでゆっくり止まる
+  eq(damperTau(30) > damperTau(80), true);
+});
+
+test('ピアノ：足りない録音は近いもので代わりに鳴らす', () => {
+  const b = new PianoBank();
+  eq(b.nearest(10, 3), null);
+  const put = (p, j) => b.bufs.set(b.name(p, j), { buf: { p, j }, onset: 0 });
+  put(10, 5); put(11, 3);
+  eq([b.nearest(10, 4).point, b.nearest(10, 4).layer], [10, 5]);
+  eq([b.nearest(11, 3).point, b.nearest(11, 3).layer], [11, 3]);
+  eq(b.nearest(12, 3).point, 11);
+  eq(b.nearest(25, 3), null);
+  eq(pianoPick(60, 0.7).layer, 3, 'ふつうの強さは最初に読む録音');
+});
+
+test('ペダル：踏んでいる音に印がつき、踏む・離すの動きが出る。リアルタイム入力は確定した音から楽譜に出る', () => {
+  const sc = createScore({ insts: ['piano'], measures: 4 });
+  E.enterNote(sc, { p: 0, s: 0, m: 0, v: 0, t: 0 }, { type: 'quarter', dots: 0, pitches: [C4] });
+  K.addSpan(sc, 0, 0, 0, { m: 0, t: 0 }, { m: 1, t: 0 }, 'ped');
+  const perf = buildPerformance(sc);
+  const n = perf.notes.find(x => x.midi === 60);
+  eq([n.ped, n.sf], [true, PIANO_SF]);
+  eq(perf.pedals.map(x => x.pedal), ['down', 'up']);
+  eq(perf.pedals[1].start > perf.pedals[0].start, true);
+
+  // 録音：画面の更新を数えるだけのにせのアプリで
+  const count = () => app.score.parts[0].staves.flatMap(st => st.measures).flatMap(sm => sm.voices.flat()).filter(e => !e.rest).length;
+  const snaps = [];
+  const app = {
+    score: createScore({ insts: ['piano'], measures: 4 }),
+    synth: { ctx: { currentTime: 0 } },
+    player: { t0: 0, fromSec: 0, stop() {}, async start() { this.perf = buildPerformance(app.score, { linear: true }); } },
+    layoutMs: 1, relayout() {},
+    edit(label, fn) { snaps.push(JSON.stringify(app.score)); fn(); },
+  };
+  const rec = new Recorder(app);
+  return rec.start({ p: 0, s: -1, m: 0, grid: TPQ / 4, triplets: false, countIn: 0, playOthers: false, tempoScale: 1, split: 60 }).then(() => {
+    const before = JSON.stringify(app.score);
+    const at = (sec) => { app.synth.ctx.currentTime = sec; return performance.now(); };
+    rec.noteOn(72, 90, at(0)); rec.noteOff(72, at(0.3));
+    rec.noteOn(76, 90, at(0.6)); // まだ押さえている
+    clearTimeout(rec.showT); rec.showT = null;
+    rec.writeNotes(rec.rawNotes()); rec.shown = true;
+    eq(count(), 1, '指を離した音だけが出る');
+    rec.noteOff(76, at(0.9));
+    clearTimeout(rec.showT); rec.showT = null;
+    eq(rec.stop(), 2);
+    eq(count(), 2, '止めたら全部入る');
+    eq(snaps[0], before, '元に戻すと録音前に戻る');
+  });
 });
 
 for (const [name, fn] of tests) {

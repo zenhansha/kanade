@@ -6,6 +6,7 @@ import { SMUFL } from '../smufl.js';
 import { DUR_GLYPH } from '../app.js';
 import { CATEGORIES, SYMBOLS, tilesHtml, symbolById, searchSymbols, iconHtml, glyphSvg } from './symbols.js';
 import { INST } from '../core/score.js';
+import { ROOMS } from '../audio/room.js';
 
 const G = SMUFL.glyphs;
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -25,6 +26,7 @@ const I = {
   play: sv('M7 4v16l13-8z', 'fill="currentColor" stroke="none"'), rewind: sv('M6 5v14M18 5l-9 7 9 7z'), loop: sv('M17 2l4 4-4 4M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 0 1-3 3H3'),
   metro: sv('M8 21h8l-2-17h-4zM12 14l6-9'), mixer: sv('M6 4v16M12 4v16M18 4v16M4 8h4M10 14h4M16 10h4'), human: sv('M12 5a2 2 0 1 0 .1 0M7 21l2-8-3-3 6-1 6 1-3 3 2 8'),
   swing: sv('M4 16c3-8 5-8 8 0s5 8 8 0'), chords: sv('M5 18V6l14-2v12M5 9l14-2'), midiOut: sv('M4 6h16v12H4zM8 10v4M12 10v4M16 10v4'), wav: sv('M3 12h2l2-6 3 12 3-14 3 12 2-4h3'),
+  reverb: sv('M4 12h2M8 8v8M12 5v14M16 8v8M20 11v2'), full: sv('M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5'),
   rec: '<svg viewBox="0 0 24 24" class="lsvg"><circle cx="12" cy="12" r="6.5" class="fill recdot"/></svg>',
   vert: sv('M7 3h10v8H7zM7 13h10v8H7z'), horiz: sv('M2 6h9v12H2zM13 6h9v12h-9z'), spread: sv('M3 5h8v14H3zM13 5h8v14h-8zM11 5h2v14h-2z'), scroll: sv('M2 9h20v6H2zM6 12h.01M10 12h.01M14 12h.01M18 12h.01'),
   zoomIn: sv('M11 4a7 7 0 1 0 .1 0M21 21l-5-5M8 11h6M11 8v6'), zoomOut: sv('M11 4a7 7 0 1 0 .1 0M21 21l-5-5M8 11h6'), fitW: sv('M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4'), fitP: sv('M6 3h12v18H6z'),
@@ -142,6 +144,7 @@ export function buildTabs(app) {
       ] },
       { ja: 'メトロノーム', items: [
         { id: 'click', ja: 'メトロノーム', title: '再生中にクリックを鳴らす', icon: I.metro, size: 'big', run: () => { a.edit('メトロノーム', () => { pb().click = !pb().click; }); a.toast(pb().click ? 'メトロノーム：オン' : 'メトロノーム：オフ'); }, on: () => !!a.score.settings.playback?.click },
+        { id: 'tapT', ja: 'タップテンポ', title: '拍に合わせてたたいてテンポを決める', icon: g('metNoteQuarterUp'), size: 'mid', run: () => dlg().tempo() },
         { id: 'countIn', ja: 'カウントイン', title: '再生前のカウント', icon: '<span class="ticon bold">1·2</span>', size: 'mid', drop: true, menu: () => [0, 1, 2].map(n => ({ label: `${(a.score.settings.playback?.countIn ?? 1) === n ? '✓ ' : ''}${n ? n + '小節' : 'なし'}`, run: () => a.edit('カウントイン', () => { pb().countIn = n; }) })) },
       ] },
       { ja: '表情', items: [
@@ -152,6 +155,7 @@ export function buildTabs(app) {
       { ja: '音', items: [
         { id: 'mixer', ja: 'ミキサー', title: '音量・左右・ミュート・ソロ', icon: I.mixer, size: 'big', run: () => tools().mixer() },
         { id: 'hq', ja: '高音質音源', title: 'ネットにつながっていれば高音質のサンプルで鳴らす', icon: I.wav, size: 'mid', run: () => { a.synth.useSamples = !a.synth.useSamples; a.toast(a.synth.useSamples ? '高音質音源：オン' : '内蔵シンセで再生します'); a.updateUI(); }, on: () => a.synth.useSamples },
+        { id: 'reverb', ja: '響き', title: '部屋の響き（ホール・部屋・なし）', icon: I.reverb, size: 'mid', drop: true, menu: () => Object.entries(ROOMS).map(([k, r]) => ({ label: `${a.synth.reverb === k ? '✓ ' : ''}${r.ja}`, run: () => a.setReverb(k) })) },
         { id: 'midiOut', ja: '外部 MIDI', title: '外部の MIDI 音源で鳴らす', icon: I.midiOut, size: 'mid', run: () => tools().midiOut() },
         { id: 'pbSet', ja: '詳しい設定', title: '再生の設定', icon: I.more, size: 'mid', run: () => tools().playback() },
       ] },
@@ -174,6 +178,7 @@ export function buildTabs(app) {
         { id: 'zoomIn', ja: '拡大', title: '拡大（Ctrl++）', icon: I.zoomIn, size: 'sm', run: () => a.view.setZoom(a.view.zoom * 1.15) },
         { id: 'zoomOut', ja: '縮小', title: '縮小（Ctrl+−）', icon: I.zoomOut, size: 'sm', run: () => a.view.setZoom(a.view.zoom / 1.15) },
         { id: 'fit', ja: '画面に合わせる', title: '画面に合わせる（Ctrl+0）', icon: I.fitW, size: 'mid', run: () => a.zoomToFit() },
+        { id: 'fullS', ja: '全画面', title: '全画面で表示（もう一度押すと戻る）', icon: I.full, size: 'mid', run: () => a.toggleFullscreen(), on: () => a.isFullscreen },
         { id: 'z100', ja: '100%', title: '実際の大きさ', icon: '<span class="ticon small bold">100</span>', size: 'sm', run: () => a.view.setZoom(1) },
       ] },
       { ja: '表示するもの', items: [
@@ -454,6 +459,7 @@ export class Ribbon {
   // ───────── ボタンの状態（オン・使えない） ─────────
   update() {
     const a = this.app, st = a.state;
+    if (!a.score) return; // 起動の途中（楽譜を開く前）。開いたあとにもう一度呼ばれる
     this.panelEl.querySelectorAll('[data-cmd]').forEach(btn => {
       const id = btn.dataset.cmd;
       const [k, v] = id.split(':');

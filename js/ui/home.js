@@ -180,6 +180,7 @@ export class Home {
       <div class="field"><span>ページの並べ方</span><div class="chips">${[['vertical', '縦に並べる'], ['horizontal', '横に並べる'], ['spread', '見開き'], ['scroll', '1段スクロール']].map(([v, l]) => `<button class="chip${a.viewOpts.arrange === v ? ' on' : ''}" data-arr="${v}">${l}</button>`).join('')}</div></div>
       ${a.isInstalled ? '' : '<button class="hbtn" data-act="install">アプリとしてインストール…</button>'}
       <p class="hm-lead">楽譜はこの端末の中に自動で保存されます（ネットには送りません）。</p>
+      <p class="hm-lead">ピアノの音：Salamander Grand Piano（作者 Alexander Holm、CC BY 3.0）を短くして使っています。</p>
     </div>`;
   }
 

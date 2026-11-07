@@ -19,6 +19,9 @@ function nearCurve(c, x, y) {
 }
 const PAGE_GAP = 28; // ページどうしの間隔（css の #pages の gap と同じ）
 
+const midOf = (p) => ({ x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 });
+const distOf = (p) => Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+
 export class ScoreView {
   constructor(app, scroller, pagesEl) {
     this.app = app;
@@ -298,7 +301,7 @@ export class ScoreView {
     for (let Lp = 6; Lp <= h.pos; Lp += 2) lines.push(Lp);
     for (let Lp = -6; Lp >= h.pos; Lp -= 2) lines.push(Lp);
     for (const Lp of lines) ledg += `<div style="position:absolute;left:${-0.4 * sp}px;top:${((h.pos - Lp) / 2) * sp - 0.08 * sp}px;width:${2 * sp}px;height:${Math.max(1, 0.16 * sp)}px;background:currentColor"></div>`;
-    el.innerHTML = `${ledg}<span class="gl">${G[headGlyph].c}</span><span class="pn" style="top:${-4.2 * sp}px;left:${-0.2 * sp}px">${label}</span>`;
+    el.innerHTML = `${ledg}<span class="gl">${G[headGlyph].c}</span><span class="pn" style="top:${(this.ghostLift ? -9 : -4.2) * sp}px;left:${-0.2 * sp}px">${label}</span>`;
   }
 
   showRange(range) {
@@ -371,20 +374,24 @@ export class ScoreView {
     const sc = this.scroller;
     sc.addEventListener('gesturestart', (e) => {
       e.preventDefault();
+      if (this.app.state.mode === 'input') return; // 入力モードは panStart〜panEnd で扱う
       startZoom = this.zoom;
       const r = sc.getBoundingClientRect();
       anchor = { cx: e.clientX - r.left, cy: e.clientY - r.top, sl: sc.scrollLeft, st: sc.scrollTop };
     });
     sc.addEventListener('gesturechange', (e) => {
       e.preventDefault();
+      if (!anchor || this.app.state.mode === 'input') return;
       const s = Math.max(0.4, Math.min(3, startZoom * e.scale)) / startZoom;
       this.pagesEl.style.transform = `scale(${s})`;
       this.pagesEl.style.transformOrigin = `${anchor.cx + anchor.sl}px ${anchor.cy + anchor.st}px`;
     });
     sc.addEventListener('gestureend', (e) => {
       e.preventDefault();
+      if (!anchor || this.app.state.mode === 'input') return;
       this.pagesEl.style.transform = '';
       this.setZoom(startZoom * e.scale, anchor);
+      anchor = null;
     });
     sc.addEventListener('wheel', (e) => {
       if (!e.ctrlKey && !e.metaKey) return;
@@ -392,6 +399,65 @@ export class ScoreView {
       const r = sc.getBoundingClientRect();
       this.setZoom(this.zoom * Math.exp(-e.deltaY * 0.0025), { cx: e.clientX - r.left, cy: e.clientY - r.top, sl: sc.scrollLeft, st: sc.scrollTop });
     }, { passive: false });
+  }
+
+  // ── 2本指の移動とピンチ（入力モードの iPad。1本指は入力に使うので、自分でスクロールする） ──
+  panStart(pts) {
+    cancelAnimationFrame(this.panRaf);
+    const sc = this.scroller, m = midOf(pts), now = performance.now();
+    this.pan = { m0: m, d0: distOf(pts), sl: sc.scrollLeft, st: sc.scrollTop, last: m, lastT: now, t0: now, vx: 0, vy: 0, far: 0, pinch: null };
+  }
+  panMove(pts) {
+    const p = this.pan;
+    if (!p) return;
+    const sc = this.scroller, m = midOf(pts), d = distOf(pts);
+    p.far = Math.max(p.far, Math.hypot(m.x - p.m0.x, m.y - p.m0.y), Math.abs(d - p.d0));
+    if (!p.pinch && Math.abs(d - p.d0) > Math.max(30, p.d0 * 0.15)) {
+      // 指の間隔が変わった：ここからピンチ（CSS で拡大して見せて、離したときに描き直す）
+      const r = sc.getBoundingClientRect();
+      const anchor = { cx: m.x - r.left, cy: m.y - r.top, sl: sc.scrollLeft, st: sc.scrollTop };
+      p.pinch = { d, m, anchor, s: 1, dx: 0, dy: 0 };
+      this.pagesEl.style.transformOrigin = (anchor.cx + anchor.sl) + 'px ' + (anchor.cy + anchor.st) + 'px';
+    }
+    if (p.pinch) {
+      const q = p.pinch;
+      q.s = Math.max(0.4, Math.min(3, this.zoom * d / q.d)) / this.zoom;
+      q.dx = m.x - q.m.x; q.dy = m.y - q.m.y;
+      this.pagesEl.style.transform = 'translate(' + q.dx + 'px,' + q.dy + 'px) scale(' + q.s + ')';
+      return;
+    }
+    const now = performance.now(), dt = Math.max(1, now - p.lastT);
+    p.vx = 0.6 * (m.x - p.last.x) / dt + 0.4 * p.vx;
+    p.vy = 0.6 * (m.y - p.last.y) / dt + 0.4 * p.vy;
+    p.last = m; p.lastT = now;
+    sc.scrollLeft = p.sl - (m.x - p.m0.x);
+    sc.scrollTop = p.st - (m.y - p.m0.y);
+  }
+  panEnd() {
+    const p = this.pan;
+    this.pan = null;
+    if (!p) return null;
+    const sc = this.scroller, now = performance.now();
+    if (p.pinch) {
+      const q = p.pinch;
+      this.pagesEl.style.transform = '';
+      this.pagesEl.style.transformOrigin = '';
+      this.setZoom(this.zoom * q.s, q.anchor);
+      sc.scrollLeft -= q.dx; sc.scrollTop -= q.dy;
+      return { tap: false };
+    }
+    // 指を離したあとも少し滑る（慣性）
+    let vx = now - p.lastT < 80 ? p.vx : 0, vy = now - p.lastT < 80 ? p.vy : 0, t = now;
+    const step = (ts) => {
+      const dt = Math.min(40, Math.max(1, ts - t));
+      t = ts;
+      sc.scrollLeft -= vx * dt; sc.scrollTop -= vy * dt;
+      const f = Math.pow(0.996, dt);
+      vx *= f; vy *= f;
+      if (Math.hypot(vx, vy) > 0.03) this.panRaf = requestAnimationFrame(step);
+    };
+    if (Math.hypot(vx, vy) > 0.08) this.panRaf = requestAnimationFrame(step);
+    return { tap: p.far < 12 && now - p.t0 < 280 };
   }
 
   setZoom(z, anchor = null) {

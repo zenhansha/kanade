@@ -78,7 +78,10 @@ export class App {
       onNoteOn: (n, vel, chord, stamp) => this.midiNoteOn(n, vel, chord, stamp),
       onNoteOff: (n, stamp) => this.midiNoteOff(n, stamp),
       onStatus: (st) => this.midiStatus(st),
+      onPedal: (down) => this.synth.setSustain(down),
     });
+    try { this.synth.reverb = localStorage.getItem('kanade.reverb') || 'hall'; } catch (e) { /* 使えない環境 */ }
+    this.player.onLoading = () => this.toast('ピアノの音を読み込んでいます…', 2500);
     if (this.midi.supported) this.midi.connect();
     else this.midiStatus({ ok: false, reason: 'unsupported', silent: true });
     this.player.onTick = (pos) => {
@@ -105,6 +108,9 @@ export class App {
     this.updateViewButton();
     window.addEventListener('resize', () => { this.view.onResize(); this.afterZoom(); });
     this.bindDesktop();
+    const warm = () => { this.synth.ensure(); (this.score?.parts || []).forEach(p => this.synth.loadSamples((INST[p.inst] || {}).sf)); };
+    window.addEventListener('pointerdown', warm, { once: true, capture: true });
+    window.addEventListener('keydown', warm, { once: true, capture: true });
   }
 
   // ───────── ドキュメント ─────────
@@ -244,6 +250,7 @@ export class App {
     document.getElementById('btnUndo').disabled = !this.history.canUndo;
     document.getElementById('btnRedo').disabled = !this.history.canRedo;
     document.body.classList.toggle('mode-input', st.mode === 'input');
+    this.piano?.update();
     if (st.mode === 'input') { this.view.pagesEl.style.cursor = ''; this.view.hover(null); }
     this.updateTitle();
     document.getElementById('zoomLabel').textContent = Math.round(this.view.zoom * 100) + '%';
@@ -279,7 +286,7 @@ export class App {
     document.getElementById('status').textContent = parts.join('　');
     const mouse = matchMedia('(pointer: fine)').matches;
     document.getElementById('hint').textContent = st.mode === 'input'
-      ? `五線を${mouse ? 'クリック' : 'タップ'}／A〜G キー／MIDI鍵盤で入力 · Esc で選択モード`
+      ? `五線を${mouse ? 'クリック' : 'タップ'}／A〜G キー／MIDI鍵盤で入力 · ${mouse ? 'Esc で選択モード' : '2本指で移動・拡大 · 2本指タップで元に戻す'}`
       : mouse ? '音符をクリックで選択 · ドラッグで範囲選択 · 右クリックでメニュー · ダブルクリックで入力'
         : '音符をタップで選択 · 上下ドラッグで音高 · 小節の空きをタップで小節選択 · N で入力';
   }
@@ -329,12 +336,14 @@ export class App {
     return r;
   }
   undo() {
+    if (this.tools.rec.active) return;
     const r = this.history.undo({ score: this.score, caret: this.state.caret, sel: this.state.sel });
     if (!r) return;
     this.score = r.score; this.state.caret = r.caret; this.state.sel = r.sel;
     this.relayout(); this.scheduleSave(); this.toast('元に戻す' + (r.label ? '：' + r.label : ''));
   }
   redo() {
+    if (this.tools.rec.active) return;
     const r = this.history.redo({ score: this.score, caret: this.state.caret, sel: this.state.sel });
     if (!r) return;
     this.score = r.score; this.state.caret = r.caret; this.state.sel = r.sel;
@@ -367,7 +376,16 @@ export class App {
     if (this.textEd) this.closeEditor();
     st.mode = mode;
     this.refreshOverlays(); this.updateUI();
+    this.refreshHover();
     if (mode === 'input') this.revealCaret();
+  }
+  // マウスが楽譜の上にあるとき、今のモードの表示（入力＝ゴースト音符 / 選択＝うっすら色付け）に今すぐそろえる
+  refreshHover() {
+    this.view.hideOverlay('ghost'); this.view.hover(null);
+    this.view.pagesEl.style.cursor = '';
+    if (!this.mouseAt) return;
+    const pt = this.view.locate(this.mouseAt.x, this.mouseAt.y), h = this.view.hit(pt);
+    if (this.state.mode === 'input') this.updateGhost(h); else this.hoverAt(h, pt);
   }
   revealCaret() {
     const r = this.view.showCaret(this.state.caret, null);
@@ -446,8 +464,8 @@ export class App {
     this.state.lastPitch = fromDiatonic(ci.mid - 3);
   }
 
-  audition(pitches, dur = 0.45) {
-    const part = this.score.parts[this.state.mode === 'input' ? this.state.caret.p : (this.selLoc()?.p ?? 0)] || this.score.parts[0];
+  audition(pitches, dur = 0.45, partIndex = null) {
+    const part = this.score.parts[partIndex ?? (this.state.mode === 'input' ? this.state.caret.p : (this.selLoc()?.p ?? 0))] || this.score.parts[0];
     const inst = INST[part.inst] || {};
     this.synth.loadSamples(inst.sf);
     for (const p of pitches) {
@@ -480,12 +498,14 @@ export class App {
     if (st.mode !== 'input') this.setMode('input');
     pitch = this.fitPitch(pitch, opts.at || st.caret);
     const chord = opts.chord || st.chord;
+    // 音は楽譜の書き直し（重い）より先に鳴らす：押した瞬間に聞こえるように
+    if (!st.rest && !opts.quiet) this.audition([pitch], st.grace ? 0.2 : 0.45);
     // 装飾音符モード：カーソルの音符の前に付ける（カーソルは進まない）
     if (st.grace && !st.rest) {
       const loc = opts.at || st.caret;
       const type = ['eighth', '16th', '32nd'].includes(st.dur.type) ? st.dur.type : 'eighth';
       this.edit('装飾音符', () => { if (!K.addGrace(this.score, loc, pitch, { type, slash: type === 'eighth', chord })) return false; });
-      st.lastPitch = pitch; this.audition([pitch], 0.2);
+      st.lastPitch = pitch;
       this.refreshOverlays(); this.revealCaret();
       return;
     }
@@ -502,9 +522,10 @@ export class App {
         this.extendOpenSpan();
       });
     }
-    if (!st.rest) { st.lastPitch = pitch; this.audition([pitch]); }
+    if (!st.rest) st.lastPitch = pitch;
     this.refreshOverlays();
-    this.revealCaret();
+    // タップで入れたときは、見ている場所を動かさない（次にタップする場所がずれないように）
+    if (!opts.at) this.revealCaret();
   }
   enterRest(opts = {}) {
     const st = this.state;
@@ -1105,26 +1126,42 @@ export class App {
     const btn = document.getElementById('btnMidi');
     btn.classList.add('flash'); setTimeout(() => btn.classList.remove('flash'), 120);
     const st = this.state;
-    if (this.tools.rec.active) { this.recSound(note, vel); this.tools.rec.noteOn(note, vel, stamp); return; }
+    const heard = this.liveOn(note, vel); // 何より先に鳴らす
+    if (this.tools.rec.active) { this.tools.rec.noteOn(note, vel, stamp); return; }
     const cst = this.score.parts[st.caret.p]?.staves[st.caret.s];
     if (st.mode === 'input' && cst?.clef === 'percussion') return this.enterPitch(P.drumPitch(P.drumForGm(note)), { chord: chordHeld });
-    if (st.mode !== 'input') {
-      // 選択モードでは音を鳴らすだけ（試し弾き）
-      const part = this.score.parts[0];
-      this.synth.play({ midi: note, program: part.program, sf: (INST[part.inst] || {}).sf, dur: 0.6, vel: vel / 127 });
-      return;
-    }
+    if (st.mode !== 'input') return; // 選択モードでは音を鳴らすだけ（試し弾き）
     const fifths = this.L.attrs[st.caret.m]?.fifths || 0;
     const pitch = spellMidi(note, fifths);
-    this.enterPitch(pitch, { chord: chordHeld });
+    this.enterPitch(pitch, { chord: chordHeld, quiet: heard });
   }
-  midiNoteOff(note, stamp) { if (this.tools.rec.active) this.tools.rec.noteOff(note, stamp); }
-  // 録音中に弾いた音を鳴らす（録音しているパートの音色で）
-  recSound(note, vel = 90) {
-    const o = this.tools.rec.o, part = this.score.parts[o.p];
+  midiNoteOff(note, stamp) { this.synth.noteOff(note); if (this.tools.rec.active) this.tools.rec.noteOff(note, stamp); }
+  // 鍵盤（MIDI キーボード・画面鍵盤）を押した音を、押しているあいだ鳴らす。戻り値 true = 鳴らした（入力のときに二重に鳴らさない）
+  liveOn(note, vel = 90) {
+    const rec = this.tools.rec;
+    const part = this.score.parts[rec.active ? rec.o.p : this.state.mode === 'input' ? this.state.caret.p : 0] || this.score.parts[0];
     const inst = INST[part.inst] || {};
-    if (part.staves.some(x => x.clef === 'percussion')) return this.synth.play({ drum: P.drumForGm(note).id, vel: vel / 127 });
-    this.synth.play({ midi: note + (inst.oct || 0), program: part.program, sf: inst.sf, dur: 0.5, vel: vel / 127 });
+    if (part.staves.some(x => x.clef === 'percussion')) {
+      if (rec.active) this.synth.play({ drum: P.drumForGm(note).id, vel: vel / 127 });
+      return rec.active;
+    }
+    this.synth.loadSamples(inst.sf);
+    this.synth.noteOn(note, { midi: note + (inst.oct || 0), program: part.program, sf: inst.sf, dur: 0.6, vel: vel / 127 });
+    return true;
+  }
+  setReverb(name) {
+    this.synth.setReverb(name);
+    try { localStorage.setItem('kanade.reverb', name); } catch (e) { /* 使えない環境 */ }
+    this.updateUI();
+  }
+  // ───────── 全画面 ─────────
+  get isFullscreen() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+  toggleFullscreen() {
+    const d = document, el = d.documentElement;
+    if (this.isFullscreen) return (d.exitFullscreen || d.webkitExitFullscreen).call(d);
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (!req) return this.toast('このブラウザは全画面に対応していません。ホーム画面に追加すると全画面で使えます', 3500);
+    Promise.resolve(req.call(el)).catch(() => this.toast('全画面にできませんでした', 2500));
   }
   midiStatus(s) {
     const btn = document.getElementById('btnMidi');
@@ -1252,6 +1289,11 @@ export class App {
     $('docTitle').onclick = () => this.dialogs.scoreInfo();
     $('btnHelp').onclick = () => this.dialogs.help();
     $('btnMidi').onclick = () => this.dialogs.midi();
+    $('btnFull').onclick = () => this.toggleFullscreen();
+    if (navigator.standalone) $('btnFull').hidden = true; // ホーム画面に追加したアプリは、最初から全画面
+    const onFull = () => { $('btnFull').classList.toggle('on', this.isFullscreen); this.view.onResize(); this.afterZoom(); this.ribbon?.update(); };
+    document.addEventListener('fullscreenchange', onFull);
+    document.addEventListener('webkitfullscreenchange', onFull);
     document.querySelector('#btnTempo .note-glyph').textContent = G.metNoteQuarterUp.c;
     $('fileInput').onchange = (e) => { const f = e.target.files[0]; if (f) this.openFile(f); e.target.value = ''; };
   }
@@ -1309,6 +1351,52 @@ export class App {
     }, { passive: false });
     pagesEl.addEventListener('touchmove', (e) => { if (drag && drag.lockScroll) e.preventDefault(); }, { passive: false });
 
+    // iPad の入力モード：1本指＝入力、2本指＝移動とピンチ拡大、2本指タップ＝元に戻す（CSS で touch-action: none にしてある）
+    const sc = this.view.scroller;
+    const touches = new Map();
+    let twoFinger = false; // 2本指の操作中。指が全部離れるまで入力しない
+    let firstT = 0, together = false; // 2本がほぼ同時に触れたか（2本指タップは、交互にたたいたときには働かせない）
+    const isText = (el) => el && el.closest && el.closest('input, textarea, [contenteditable]');
+    sc.addEventListener('touchstart', (e) => { if (this.state.mode === 'input' && !isText(e.target)) e.preventDefault(); }, { passive: false });
+    sc.addEventListener('pointerdown', (e) => {
+      if (e.pointerType !== 'touch' || this.state.mode !== 'input') return;
+      // 最初の指なら、取り残された指の記録を消す（楽譜を描き直すと、指を離した知らせが届かないことがある）
+      if (e.isPrimary) { touches.clear(); twoFinger = false; this.view.pan = null; firstT = e.timeStamp; }
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        together = e.timeStamp - firstT < 150;
+        if (drag) { clearTimeout(drag.soundT); clearTimeout(this.lpT); drag = null; }
+        this.view.hideOverlay('ghost');
+        twoFinger = true;
+        this.view.panStart([...touches.values()]);
+      }
+      if (twoFinger) e.stopPropagation();
+    }, true);
+    sc.addEventListener('pointermove', (e) => {
+      const t = touches.get(e.pointerId);
+      if (!t) return;
+      t.x = e.clientX; t.y = e.clientY;
+      if (!twoFinger) return;
+      e.stopPropagation();
+      if (touches.size >= 2) this.view.panMove([...touches.values()]);
+    }, true);
+    const lift = (e) => {
+      if (!touches.delete(e.pointerId) || !twoFinger) return;
+      e.stopPropagation();
+      if (touches.size < 2 && this.view.pan) { const r = this.view.panEnd(); if (r?.tap && together) this.undo(); }
+      if (!touches.size) twoFinger = false;
+    };
+    window.addEventListener('pointerup', lift, true);
+    window.addEventListener('pointercancel', lift, true);
+    // iPad Safari：素早く2回タップしても、画面全体が拡大されないように
+    let lastEnd = 0;
+    document.addEventListener('touchend', (e) => {
+      const quick = e.timeStamp - lastEnd < 350;
+      lastEnd = e.timeStamp;
+      if (quick && e.cancelable && !e.target.closest('input, select, textarea, [contenteditable], button, a, label, #pages')) e.preventDefault();
+    }, { passive: false });
+    document.addEventListener('gesturestart', (e) => e.preventDefault());
+
     pagesEl.addEventListener('pointerdown', (e) => {
       if (e.button > 0) return;
       this.synth.ensure();
@@ -1316,8 +1404,18 @@ export class App {
       const h = this.view.hit(pt);
       drag = { id: e.pointerId, x0: e.clientX, y0: e.clientY, type: e.pointerType, h, moved: false, lockScroll: e.pointerType === 'pen' };
       const st = this.state;
+      this.view.ghostLift = e.pointerType === 'touch'; // 指で隠れないように、音名を高い位置に出す
       if (st.mode === 'input' && h) {
         this.updateGhost(h);
+        // 押した瞬間に鳴らす（音符が入るのは離したとき）。指は2本指の操作かもしれないので、ほんの少しだけ待つ
+        const d1 = drag;
+        const hear = () => {
+          if (drag !== d1 || st.rest) return;
+          const fp = this.fitPitch(this.concertOf(h.pitch, h.p), h);
+          d1.heard = fp.drum ? fp.drum : midiOf(fp);
+          this.audition([fp], 0.45, h.p);
+        };
+        if (e.pointerType === 'touch') d1.soundT = setTimeout(hear, 30); else hear();
       } else if (st.mode === 'select' && h) {
         // 選択中の音符の上で押したら、上下ドラッグで音高を変える
         const near = this.view.nearestEvent(h, 1.6);
@@ -1347,6 +1445,7 @@ export class App {
 
     pagesEl.addEventListener('pointermove', (e) => {
       const st = this.state;
+      if (e.pointerType === 'mouse') this.mouseAt = { x: e.clientX, y: e.clientY };
       if (!drag || drag.id !== e.pointerId) {
         // マウスを乗せただけのとき：入力モードはゴースト音符、選択モードは音符をうっすら色付け
         if (e.pointerType !== 'mouse') return;
@@ -1358,7 +1457,14 @@ export class App {
       }
       if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) > 8) { drag.moved = true; clearTimeout(this.lpT); }
       const h = this.view.hit(this.view.locate(e.clientX, e.clientY));
-      if (st.mode === 'input' && (drag.type !== 'touch' || !drag.moved)) this.updateGhost(h);
+      // 入力モード：指は少し動いても押した高さのまま（ぶれ防止）。はっきり動かしたら高さが変わり、その音を聞かせる
+      if (st.mode === 'input' && (drag.type !== 'touch' || drag.moved)) {
+        this.updateGhost(h);
+        if (h && !st.rest && drag.heard != null) {
+          const fp = this.fitPitch(this.concertOf(h.pitch, h.p), h), key = fp.drum ? fp.drum : midiOf(fp);
+          if (key !== drag.heard) { drag.heard = key; this.audition([fp], 0.25, h.p); }
+        }
+      }
       if (drag.range && drag.moved && h) {
         const a = drag.range;
         const s = st.sel;
@@ -1392,16 +1498,18 @@ export class App {
       const st = this.state;
       if (d.pitchDrag) { if (d.pitchDrag.applied) this.scheduleSave(); return; }
       if (d.rangeDone) { this.lastRangeTap = 0; return; }
-      if (cancel || (d.moved && d.type === 'touch')) { if (e.pointerType !== 'mouse') this.view.hideOverlay('ghost'); return; }
+      clearTimeout(d.soundT);
+      if (cancel || (d.moved && d.type === 'touch' && st.mode !== 'input')) { if (e.pointerType !== 'mouse') this.view.hideOverlay('ghost'); return; }
       const pt = this.view.locate(e.clientX, e.clientY);
-      const h = this.view.hit(pt) || d.h;
+      // 指：動かしていなければ押した高さのまま。五線の外へすべらせて離すと取り消し
+      const h = d.type === 'touch' && st.mode === 'input' ? (d.moved ? this.view.hit(pt) : d.h) : this.view.hit(pt) || d.h;
       if (e.pointerType !== 'mouse') this.view.hideOverlay('ghost');
       if (st.mode === 'select') return this.tapSelect(h, e, pt);
-      if (h) this.tapInput(h, e);
+      if (h) this.tapInput(h, e, d.heard);
     };
     pagesEl.addEventListener('pointerup', (e) => finish(e, false));
     pagesEl.addEventListener('pointercancel', (e) => finish(e, true));
-    pagesEl.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { this.view.hideOverlay('ghost'); this.view.hover(null); } });
+    pagesEl.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { this.mouseAt = null; this.view.hideOverlay('ghost'); this.view.hover(null); } });
     // ダブルクリック（ダブルタップ）：選んだ所から入力を始める
     // 記号の上ならその記号を編集（歌詞・コードネーム・文字）
     pagesEl.addEventListener('dblclick', () => {
@@ -1533,25 +1641,28 @@ export class App {
     const p = h.pitch;
     this.view.showGhost(tg, head, this.state.rest ? '休' : `${STEP_JA[p.step]}${p.alter > 0 ? '♯' : p.alter < 0 ? '♭' : ''}${p.octave}`);
   }
-  tapInput(h, e) {
+  tapInput(h, e, heard = null) {
     const st = this.state;
     const tg = this.resolveInputTarget(h);
     const loc = { p: h.p, s: h.s, m: h.m, v: st.voice, t: tg.t };
     let pitch = this.concertOf(h.pitch, h.p); // 記譜音で表示中なら実音にして入れる
     if (h.tabStr) pitch = { ...pitch, str: h.tabStr }; // TAB をタップ：その弦の開放弦
+    const fp = this.fitPitch(pitch, h);
+    const quiet = heard != null && heard === (fp.drum ? fp.drum : midiOf(fp)); // 押したときに同じ高さを鳴らし済み
     // 和音モード or Shift：そのタイミングにある音符へ足す（装飾音符モードなら装飾音の和音）
     if ((st.chord || e.shiftKey) && !st.rest && !st.grace) {
       const at = E.eventAt(this.score, loc);
       if (at && !at.ev.rest) {
         st.lastId = at.ev.id;
+        if (!quiet) this.audition([pitch], 0.45, h.p);
         this.edit('和音に追加', () => E.addToChord(this.score, at.ev.id, pitch));
-        st.lastPitch = pitch; this.audition([pitch]);
+        st.lastPitch = pitch;
         return;
       }
     }
     st.caret = loc;
     if (st.rest) this.enterRest({ at: loc });
-    else this.enterPitch(pitch, { at: loc, chord: st.grace && e.shiftKey });
+    else this.enterPitch(pitch, { at: loc, chord: st.grace && e.shiftKey, quiet });
   }
   tapSelect(h, e, pt) {
     const st = this.state;
