@@ -61,6 +61,7 @@ export class Home {
   async show(mode = 'home') {
     const a = this.app;
     if (a.player.playing) a.player.stop();
+    if (a.live?.active) a.live.stop();
     if (a.tools?.rec.active) a.tools.stopRec();
     a.dialogs.close();
     // launch = 起動したとき（Word と同じく、まだ何も開いていない扱い。最近の楽譜から選ぶ）

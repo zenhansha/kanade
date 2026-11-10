@@ -40,6 +40,12 @@ const I = {
   check: sv('M4 12l5 5L20 6'), goto: sv('M4 12h12M12 6l6 6-6 6M20 4v16'), wide: sv('M4 12h16M7 8l-4 4 4 4M17 8l4 4-4 4'), narrow: sv('M3 12h6M15 12h6M6 8l4 4-4 4M18 8l-4 4 4 4'),
   pal: sv('M12 3a9 9 0 1 0 0 18c1 0 1.5-.8 1.5-1.6 0-1 .9-1.4 1.8-1.4H17a4 4 0 0 0 4-4c0-5-4-11-9-11z'), more: sv('M5 12h.01M12 12h.01M19 12h.01', 'stroke-width="3" stroke-linecap="round"'),
   collapse: sv('M6 15l6-6 6 6'), expand: sv('M6 9l6 6 6-6'),
+  mic: sv('M9 5a3 3 0 0 1 6 0v6a3 3 0 0 1-6 0zM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7'),
+  follow: sv('M3 5c3-1 6-1 9 1v14c-3-2-6-2-9-1zM21 5c-3-1-6-1-9 1v14c3-2 6-2 9-1zM15 9l2 2 3-4'),
+  practice: sv('M12 3a9 9 0 1 0 .1 0M12 7.5a4.5 4.5 0 1 0 .1 0M12 11.5v1'),
+  ramp: sv('M4 19l5-6 4 3 7-9M15 7h5v5'),
+  accomp: sv('M4 19V7l8-2v12M4 11l8-2M16 9v8a2 2 0 1 0 2 2V11h3'),
+  guess: sv('M5 18V6l11-2v12M5 9l11-2M18 13a2.5 2.5 0 1 1 3 2.4V17M21 20.5v.01'),
 };
 const g = (name) => glyphSvg(name, 'rbg');
 const DURS = [['64th', '1', '64分'], ['32nd', '2', '32分'], ['16th', '3', '16分'], ['eighth', '4', '8分'], ['quarter', '5', '4分'], ['half', '6', '2分'], ['whole', '7', '全']];
@@ -70,6 +76,9 @@ export function buildTabs(app) {
         { id: 'grace', ja: '装飾音符', title: '装飾音符モード（;）', icon: g('graceNoteAcciaccaturaStemUp'), size: 'sm', key: ';', run: () => a.toggleGrace(), on: () => !!st().grace, inputOn: true },
       ] },
       { ja: '声部', items: [{ id: 'voices', special: 'voices' }] },
+      { ja: '声で入力', items: [
+        { id: 'humH', ja: '鼻歌入力', title: '歌うと楽譜になる（マイク）', icon: I.mic, size: 'big', run: () => tools().humDialog(), on: () => !!a.live?.hum },
+      ] },
       { ja: 'よく使う記号', items: [sym('art:stacc'), sym('art:acc'), sym('span:slur'), sym('span:cresc'), sym('span:dim'),
         { id: 'dynq', ja: '強弱', title: '強弱記号', icon: g('dynamicMF'), size: 'sm', drop: true, gallery: 'dyn' }] },
       { ja: '編集', items: [
@@ -159,7 +168,13 @@ export function buildTabs(app) {
         { id: 'midiOut', ja: '外部 MIDI', title: '外部の MIDI 音源で鳴らす', icon: I.midiOut, size: 'mid', run: () => tools().midiOut() },
         { id: 'pbSet', ja: '詳しい設定', title: '再生の設定', icon: I.more, size: 'mid', run: () => tools().playback() },
       ] },
+      { ja: '練習', items: [
+        { id: 'follow', ja: 'ついてくる', title: '弾いている場所を追いかけて、自動でページをめくる（MIDI キーボード・マイク）', icon: I.follow, size: 'big', run: () => (a.live?.follow ? a.live.followStop() : tools().followDialog(false)), on: () => !!a.live?.follow && !a.live.follow.o.strict },
+        { id: 'practice', ja: '練習モード', title: '正しく弾くまで進まない。間違えた音を数えて、苦手な小節を教える（MIDI キーボード）', icon: I.practice, size: 'mid', run: () => (a.live?.follow ? a.live.followStop() : tools().followDialog(true)), on: () => !!a.live?.follow?.o.strict },
+        { id: 'rampLoop', ja: 'だんだん速く', title: 'ループ再生のたびに 5% ずつ速くする（100% まで）', icon: I.ramp, size: 'mid', run: () => { a.rampLoop = !a.rampLoop; a.toast(a.rampLoop ? 'だんだん速く：オン（ループ再生のたびに 5% ずつ速くなります）' : 'だんだん速く：オフ', 2500); a.updateUI(); }, on: () => a.rampLoop },
+      ] },
       { ja: '録音', items: [
+        { id: 'hum', ja: '鼻歌入力', title: '歌うと楽譜になる（マイク）', icon: I.mic, size: 'big', run: () => tools().humDialog(), on: () => !!a.live?.hum },
         { id: 'hs', ja: 'リアルタイム入力', title: 'メトロノームに合わせて弾くと楽譜になる（HyperScribe）', icon: I.rec, size: 'big', run: () => (tools().rec.active ? tools().stopRec() : tools().hyperscribe()), on: () => tools().rec.active },
       ] },
     ] },
@@ -206,6 +221,10 @@ export function buildTabs(app) {
         { id: 'repeatSel', ja: 'くり返し', title: 'くり返し（R）：選んだ範囲をすぐ後ろにもう一度', icon: I.repeat, size: 'mid', run: () => a.repeatSelection() },
         { id: 'swapV', ja: '声部の入れ替え', title: '声部1 と 声部2 を入れ替える', icon: I.swap, size: 'mid', run: () => a.swapVoices() },
         { id: 'slashes', ja: 'スラッシュ', title: 'スラッシュで埋める（コード譜のリズム譜）', icon: I.slashes, size: 'mid', run: () => a.fillSlashes() },
+      ] },
+      { ja: '作曲', items: [
+        { id: 'accomp', ja: '伴奏をつける', title: 'コードネームからピアノの伴奏を書く（アルペジオ・バラード・ワルツ …）', icon: I.accomp, size: 'big', run: () => tools().accompany() },
+        { id: 'guessCh', ja: 'コードを推定', title: 'メロディーから合うコードネームを推定して書き込む', icon: I.guess, size: 'mid', run: () => tools().guessChords() },
       ] },
       { ja: '書き出し', items: [
         { id: 'expXml', ja: 'MusicXML', title: 'MusicXML に書き出す（Ctrl+E）', icon: I.xml, size: 'mid', run: () => a.exportXML() },

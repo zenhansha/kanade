@@ -16,6 +16,9 @@ import { SMUFL } from '../js/smufl.js';
 import { PIANO } from '../js/audio/pianodata.js';
 import { pianoPick, pianoRate, pianoGain, damperTau, PIANO_SF, PianoBank } from '../js/audio/piano.js';
 import { Recorder } from '../js/audio/recorder.js';
+import * as LI from '../js/audio/listen.js';
+import { buildGroups, Follower, tempoRate } from '../js/audio/follow.js';
+import * as AC from '../js/core/accomp.js';
 import fs from 'node:fs';
 
 let pass = 0, fail = 0;
@@ -830,6 +833,190 @@ test('ペダル：踏んでいる音に印がつき、踏む・離すの動き�
     eq(count(), 2, '止めたら全部入る');
     eq(snaps[0], before, '元に戻すと録音前に戻る');
   });
+});
+
+// ───────── 鼻歌入力・伴奏・ついてくる ─────────
+// 小さなメロディー（ハ長調 8小節）を (p, s) = (0, 0) に書く
+const MEL8 = 'E4:1 G4:1 C5:1 G4:1 A4:1 F4:1 A4:2 G4:1 E4:1 C4:1 E4:1 D4:2 G4:2 E4:1 G4:1 C5:1 E5:1 D5:1 C5:1 A4:2 G4:1 F4:1 D4:1 B3:1 C4:4';
+function melodyScore(insts = ['piano'], measures = 8, opt = {}) {
+  const sc = createScore({ insts, measures, ...opt });
+  let abs = 0;
+  const items = MEL8.split(' ').map(s => { const [p, d] = s.split(':'); const it = { start: abs, end: abs + d * TPQ, pitches: [{ step: p[0], alter: 0, octave: +p[1] }] }; abs += d * TPQ; return it; });
+  S.writeStream(sc, 0, 0, 0, items);
+  return sc;
+}
+const lh = (sc, p, s, m1, m2) => S.readStream(sc, p, s, 0, m1, m2).map(it => it.pitches.map(pitchName).join('+') + '/' + (it.end - it.start) / TPQ).join(' ');
+
+test('鼻歌：声の高さを測って音に区切り、歌い手のずれとオクターブを直す', () => {
+  // 倍音・ビブラート・しゃくり上げ・少しの雑音がある「声」を作り、10ms ごとに測る
+  const SR = 48000;
+  const song = [[0, 0.45, 60.3], [0.5, 0.95, 62.3], [1.0, 1.45, 64.25], [1.5, 2.4, 60.3], [2.4, 2.9, 67.35], [3.0, 3.2, 67.3], [3.28, 3.5, 67.3], [3.6, 4.4, 65.3]];
+  const L = Math.ceil(4.8 * SR), wav = new Float32Array(L);
+  let ph = 0, seed = 1;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) - 0.5;
+  for (let i = 0; i < L; i++) {
+    const t = i / SR, n = song.find(s => t >= s[0] && t < s[1]);
+    let amp = 0, midi = 60;
+    if (n) { const age = t - n[0], left = n[1] - t; amp = Math.min(1, age / 0.03, left / 0.03) * 0.25; midi = n[2] + 0.15 * Math.sin(2 * Math.PI * 5.5 * t) + (age < 0.06 ? -0.8 * (1 - age / 0.06) : 0); }
+    ph += (2 * Math.PI * 440 * 2 ** ((midi - 69) / 12)) / SR;
+    wav[i] = amp * (Math.sin(ph) + 0.5 * Math.sin(2 * ph) + 0.25 * Math.sin(3 * ph)) + rnd() * 0.004;
+  }
+  const seg = new LI.HumSegmenter(), notes = [];
+  let dec = null;
+  for (let end = 2048; end <= L; end += 480) {
+    const buf = wav.subarray(end - 2048, end);
+    dec = LI.decimate(buf, 4, dec);
+    const r = LI.yin(dec, SR / 4);
+    notes.push(...seg.feed({ time: ((end - 1024) / SR) * 1000, f: r.f, clarity: r.clarity, rms: LI.rms(buf) }));
+  }
+  notes.push(...seg.flush());
+  eq(notes.length, 8, '同じ高さの言い直し・レガートの高さの変化も区切る');
+  eq(LI.humPitches(notes, { fifths: 0, snap: true, clef: 'treble' }).map(n => n.midi), [60, 62, 64, 60, 67, 67, 67, 65]);
+  // 1オクターブ下で歌っても（男声）、ト音記号に合う高さで書く。ヘ音記号ならそのまま
+  const low = notes.map(n => ({ ...n, f: n.f - 12 }));
+  eq(LI.humPitches(low, { clef: 'treble' })[0].midi, 60);
+  eq(LI.humPitches(low, { clef: 'bass' })[0].midi, 48);
+  // 調の音にそろえる：ハ長調で F♯ っぽく（66.4）歌っても G に
+  eq(LI.humPitches([{ a: 0, b: 500, f: 66.6 }], { fifths: 0, snap: true, offset: 0 })[0].midi, 67);
+  eq(LI.humPitches([{ a: 0, b: 500, f: 66.6 }], { fifths: 1, snap: true, offset: 0 })[0].midi, 67, 'ト長調なら F♯ は調の音だが 66.6 は G に近い');
+  eq(LI.humPitches([{ a: 0, b: 500, f: 66.2 }], { fifths: 1, snap: true, offset: 0 })[0].midi, 66);
+
+  // リアルタイム入力（リズムも）：区切れた音を録音に足すと、止めたときに高さを決めて書き込む
+  const app = {
+    score: createScore({ insts: ['piano'], measures: 4 }),
+    synth: { ctx: { currentTime: 0 } },
+    player: { t0: 0, fromSec: 0, stop() {}, async start() { this.perf = buildPerformance(app.score, { linear: true }); } },
+    layoutMs: 1, relayout() {}, edit(label, fn) { fn(); },
+  };
+  const rec = new Recorder(app);
+  const map = (ns) => LI.legato(LI.humPitches(ns, { fifths: 0, snap: true, clef: 'treble' }), 0.12);
+  return rec.start({ p: 0, s: 0, m: 0, grid: TPQ / 4, triplets: false, countIn: 0, playOthers: false, tempoScale: 1, split: 60, mapNotes: map, hum: true }).then(() => {
+    // テンポ 100：1拍 0.6 秒。secAt は currentTime と stamp の差で決まるので、stamp = performance.now() からの ms で渡す
+    const now = performance.now();
+    const at = (sec) => now + sec * 1000;
+    // 1オクターブ下・少し高めに歌った「ミ ソ ド」（4分・4分・2分）。息つぎのすきま（0.1秒）は休符にしない
+    [[0, 0.5, 52.2], [0.6, 1.1, 55.2], [1.2, 2.38, 60.2]].forEach(([s, e, f]) => rec.addHum(at(s), at(e), f));
+    clearTimeout(rec.showT); rec.showT = null;
+    eq(rec.stop(), 3);
+    eq(desc(app.score.parts[0].staves[0].measures[0].voices[0]), 'E4:quarter G4:quarter C5:half');
+  });
+});
+
+test('伴奏：メロディーからコードを推定し、6つの型で左手を書く', () => {
+  const sc = melodyScore();
+  const est = AC.estimateChords(sc, { p: 0, s: 0 });
+  eq(est.minor, false);
+  eq(est.chords.map(c => c.text), ['C', 'F', 'C', 'G', 'C', 'Dm', 'G7', 'C']);
+  const want = {
+    whole: 'C2+C3/4 F2+F3/4',
+    arp: 'C2/0.5 G2/0.5 C3/0.5 E3/0.5 C2/0.5 G2/0.5 C3/0.5 E3/0.5 F2/0.5 C3/0.5 F3/0.5 A3/0.5 F2/0.5 C3/0.5 F3/0.5 A3/0.5',
+    ballad: 'C2/1.5 G2/0.5 C3/2 F2/1.5 C3/0.5 F3/2',
+    waltz: 'C2/1 E3+G3+C4/1 G2/1 E3+G3+C4/1 F2/1 F3+A3+C4/1 C3/1 F3+A3+C4/1',
+    bossa: 'C2/1.5 G2/0.5 G2/1.5 C2/0.5 F2/1.5 C3/0.5 C3/1.5 F2/0.5',
+    beat8: 'C2/0.5 C2/0.5 C2/0.5 C2/0.5 C2/0.5 C2/0.5 C2/0.5 C2/0.5 F2/0.5 F2/0.5 F2/0.5 F2/0.5 F2/0.5 F2/0.5 F2/0.5 F2/0.5',
+  };
+  for (const st of AC.STYLES) {
+    const x = melodyScore();
+    const r = AC.addAccompaniment(x, { style: st.id, estimate: true });
+    eq([r.ok, r.measures, r.added.length], [true, 8, 8], st.ja);
+    eq(lh(x, 0, 1, 0, 1), want[st.id], st.ja);
+    eq(lh(x, 0, 0, 0, 0), 'E4/1 G4/1 C5/1 G4/1', 'メロディーはそのまま');
+  }
+});
+
+test('伴奏：綴り・両手・ピアノを足す・小節の途中のコード・3拍子と6/8', () => {
+  // 書いてあるコードを使う。B♭ の3度は D、F/A のベースは A、Gm7・C7 の7度も正しく綴る
+  const b = melodyScore(['flute']);
+  [[0, 'Bb'], [1, 'F/A'], [2, 'Gm7'], [3, 'C7']].forEach(([m, t]) => K.addDir(b, 0, 0, m, { t: 0, k: 'chord', text: t }));
+  const r = AC.addAccompaniment(b, { style: 'whole', estimate: false, m1: 0, m2: 3 });
+  eq([b.parts.length, b.parts[1].name, r.target], [2, 'ピアノ（伴奏）', { p: 1, lh: 1, rh: 0 }], 'ピアノがなければ足して両手で');
+  eq(lh(b, 1, 1, 0, 3), 'B♭2+B♭3/4 A2+A3/4 G2+G3/4 C3+C4/4');
+  eq(lh(b, 1, 0, 0, 3), 'D4+F4+B♭4/4 C4+F4+A4/4 D4+F4+G4+B♭4/4 C4+E4+G4+B♭4/4');
+  // 歌＋ピアノなら、ピアノの両手
+  const v = melodyScore(['voice', 'piano']);
+  eq(AC.addAccompaniment(v, { style: 'ballad', estimate: true }).target, { p: 1, lh: 1, rh: 0 });
+  eq(lh(v, 1, 0, 0, 0), 'E4+G4+C5/2 E4+G4+C5/2');
+  // 小節の途中で C → Am。コードのない次の小節は書きかえない
+  const c = melodyScore();
+  K.addDir(c, 0, 0, 0, { t: 0, k: 'chord', text: 'C' }); K.addDir(c, 0, 0, 0, { t: 2 * TPQ, k: 'chord', text: 'Am' });
+  AC.addAccompaniment(c, { style: 'arp', estimate: false, m1: 0, m2: 0 });
+  eq(lh(c, 0, 1, 0, 1), 'C2/0.5 G2/0.5 C3/0.5 E3/0.5 A2/0.5 E3/0.5 A3/0.5 C4/0.5');
+  // 3拍子・6/8
+  const got = [];
+  for (const time of [{ beats: 3, beatType: 4 }, { beats: 6, beatType: 8 }]) for (const st of ['arp', 'waltz']) {
+    const x = createScore({ insts: ['piano'], measures: 2, time });
+    K.addDir(x, 0, 0, 0, { t: 0, k: 'chord', text: 'G' });
+    AC.addAccompaniment(x, { style: st, estimate: false });
+    got.push(lh(x, 0, 1, 0, 0));
+  }
+  eq(got, ['G2/0.5 D3/0.5 G3/0.5 B3/0.5 G3/0.5 D3/0.5', 'G2/1 D3+G3+B3/1 D3+G3+B3/1', 'G2/0.5 D3/0.5 G3/0.5 B3/0.5 G3/0.5 D3/0.5', 'G2/1.5 D3+G3+B3/1.5']);
+  // 短調の推定（イ短調：導音 G♯ と、ラで終わる）
+  const mi = createScore({ insts: ['piano'], measures: 4 });
+  let abs = 0;
+  const items = 'A4:2 C5:2 E5:2 C5:2 B4:2 G#4:2 A4:4'.split(' ').map(s => { const [p, d] = s.split(':'); const it = { start: abs, end: abs + d * TPQ, pitches: [{ step: p[0], alter: p[1] === '#' ? 1 : 0, octave: +p[p.length - 1] }] }; abs += d * TPQ; return it; });
+  S.writeStream(mi, 0, 0, 0, items);
+  const em = AC.estimateChords(mi, { p: 0, s: 0 });
+  eq([em.minor, em.chords[0].text, em.chords[3].text], [true, 'Am', 'Am']);
+});
+
+test('ついてくる：右手だけ・まちがい・途中から・練習モード', () => {
+  const sc = melodyScore();
+  AC.addAccompaniment(sc, { style: 'whole', estimate: true });
+  const G = buildGroups(buildPerformance(sc, { human: false }), 0);
+  eq(G.length, 25);
+  eq(G[0].midis, [36, 48, 64]);
+  // 全部正しく
+  let fo = new Follower(G), t = 0;
+  for (const g of G) for (const m of g.midis) fo.noteOn(m, (t += 100));
+  eq([fo.cur, fo.wrong, fo.done], [24, 0, true]);
+  // 右手だけ。ときどき半音ずれた音を弾いても最後まで進む
+  fo = new Follower(G); t = 0;
+  G.map(g => g.midis.filter(m => m >= 60)).filter(x => x.length).forEach((ms, i) => { if (i % 7 === 3) fo.noteOn(ms[0] + 1, (t += 100)); for (const m of ms) fo.noteOn(m, (t += 100)); });
+  eq([fo.cur, fo.wrong], [24, 3]);
+  // 5小節目から弾きはじめても、場所を探し直してついてくる
+  fo = new Follower(G); t = 0;
+  const k5 = G.findIndex(g => g.m === 4);
+  for (const g of G.slice(k5, k5 + 6)) for (const m of g.midis) fo.noteOn(m, (t += 100));
+  eq(G[fo.cur].m >= 4 && G[fo.cur].m <= 5, true, '5〜6小節');
+  // 練習モード：和音を全部そろえるまで進まない。違う音は小節ごとに数える
+  fo = new Follower(G, { strict: true }); t = 0;
+  fo.noteOn(36, (t += 100)); fo.noteOn(61, (t += 100)); fo.noteOn(48, (t += 100));
+  eq(fo.cur, -1);
+  fo.noteOn(64, (t += 100));
+  eq([fo.cur, fo.wrong], [0, 1]);
+  fo.noteOn(60, (t += 100)); fo.noteOn(60, (t += 100));
+  eq(fo.report().worst, [{ m: 0, n: 3 }]);
+});
+
+test('ついてくる（マイク）：音名の強さとテンポで確率を動かし、先へ飛ばず最後までついてくる', () => {
+  // 同じメロディーを2回くり返す16小節（同じ和音が何度も出てくる、いちばん迷いやすい形）
+  let worst = 0, lagSum = 0, lagN = 0, stuck = 0;
+  for (const style of ['ballad', 'arp', 'waltz']) {
+    const sc = createScore({ insts: ['piano'], measures: 16 });
+    let abs = 0;
+    const its = [];
+    for (let r = 0; r < 2; r++) for (const s of MEL8.split(' ')) { const [p, d] = s.split(':'); its.push({ start: abs, end: abs + d * TPQ, pitches: [{ step: p[0], alter: 0, octave: +p[1] }] }); abs += d * TPQ; }
+    S.writeStream(sc, 0, 0, 0, its);
+    AC.addAccompaniment(sc, { style, estimate: true });
+    const G = buildGroups(buildPerformance(sc, { human: false }), 0);
+    for (let seed0 = 1; seed0 <= 4; seed0++) for (const scale of [0.7, 1, 1.4]) {
+      let seed = seed0 * 7919;
+      const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+      const fo = new Follower(G);
+      G.forEach((g, k) => {
+        if (k > 0 && rnd() < 0.2) return; // 2割の出だしを聞き逃す
+        const c = LI.expectedChroma(g.midis).map(x => x + rnd() * 0.25); // 雑音
+        fo.hear(c, (g.sec / scale + 0.3 * Math.sin(g.sec * 0.5)) * 1000 + 200); // テンポの倍率と揺れ
+        if (fo.cur >= 0) { worst = Math.max(worst, (G[fo.cur].sec - g.sec) / G[0].beat); lagSum += Math.max(0, (g.sec - G[fo.cur].sec) / G[0].beat); lagN++; }
+      });
+      if (fo.cur < G.length - 3) stuck++;
+    }
+  }
+  eq(stuck, 0, '置いていかれない');
+  eq(worst <= 1.5, true, `先へずれるのは1拍半まで（${worst}）`);
+  eq(lagSum / lagN < 0.25, true, '遅れは平均 1/4 拍より小さい');
+  // テンポの見積もり：2点ずつの傾きの中央値。1つ外れていても引っぱられない
+  eq(+tempoRate([{ T: 0, sec: 0 }, { T: 1, sec: 0.8 }, { T: 2, sec: 1.6 }, { T: 2.5, sec: 5 }, { T: 3, sec: 2.4 }]).toFixed(2), 0.8);
 });
 
 for (const [name, fn] of tests) {

@@ -15,7 +15,7 @@ export function bindKeys(app) {
       return;
     }
     if (app.dialogs.menuEl && e.key === 'Escape') { e.preventDefault(); return app.dialogs.closeMenu(); }
-    if (app.tools?.rec.active && e.key !== ' ' && e.key !== 'Escape') return;
+    if ((app.tools?.rec.active || app.live?.follow) && e.key !== ' ' && e.key !== 'Escape') return;
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key;
     const code = e.code;

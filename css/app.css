@@ -131,6 +131,37 @@ svg.page .playing, svg.page .playing * { fill: #e8590c !important; stroke: #e859
 .ghost .pn { position: absolute; left: 0; font-family: -apple-system, "Hiragino Sans", sans-serif; font-size: 12px; font-weight: 600; background: var(--input); color: #fff; border-radius: 5px; padding: 3px 5px; line-height: 1; opacity: .9; }
 .rangesel { background: rgba(47, 91, 211, .12); border: 1.5px solid var(--accent); border-radius: 3px; }
 .playline { width: 2px; background: #e8590c; box-shadow: 0 0 8px rgba(232,89,12,.6); }
+.followline { background: #2f7de1; box-shadow: 0 0 10px rgba(47,125,225,.7); transition: left .12s ease-out, top .12s ease-out; }
+svg.page .next, svg.page .next * { fill: #2f7de1 !important; stroke: #2f7de1 !important; }
+svg.page .next text { stroke: none !important; }
+
+/* 鼻歌・ついてくるのあいだの帯（画面の下のまんなか） */
+.live-pill { position: fixed; left: 50%; bottom: calc(44px + env(safe-area-inset-bottom)); transform: translateX(-50%); z-index: 60;
+  display: flex; align-items: center; gap: 10px; max-width: calc(100vw - 24px); padding: 8px 8px 8px 14px; border-radius: 999px;
+  background: var(--chrome); color: var(--text); box-shadow: 0 6px 24px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.06); font-size: 14px; white-space: nowrap; }
+.live-pill[hidden] { display: none; }
+.live-pill .lp-ico { font-size: 18px; }
+.live-pill .lp-main { overflow: hidden; text-overflow: ellipsis; }
+.live-pill .lp-main b { font-size: 16px; }
+.live-pill .muted { color: var(--muted); font-size: 13px; }
+.live-pill .ng { color: #d33; font-weight: 600; }
+.live-pill .lp-meter { width: 46px; height: 6px; border-radius: 3px; background: rgba(127,127,127,.25); overflow: hidden; flex: none; }
+.live-pill .lp-meter i { display: block; height: 100%; width: 0; background: #2f9e44; transition: width .08s linear; }
+.live-pill.follow .lp-meter { display: none; }
+.live-pill.follow.mic .lp-meter { display: block; }
+.live-pill .lp-stop { flex: none; border: 0; border-radius: 999px; padding: 7px 14px; background: #d33; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.live-pill.hum.voiced .lp-ico { animation: lpPulse .6s ease-in-out infinite alternate; }
+@keyframes lpPulse { from { transform: scale(1); } to { transform: scale(1.18); } }
+.live-pill.ok-flash { animation: lpOk .35s ease-out; }
+.live-pill.ng-flash { animation: lpNg .45s ease-out; }
+@keyframes lpOk { from { box-shadow: 0 0 0 4px rgba(47,158,68,.6), 0 6px 24px rgba(0,0,0,.18); } }
+@keyframes lpNg { 0% { box-shadow: 0 0 0 4px rgba(221,51,51,.7), 0 6px 24px rgba(0,0,0,.18); } 25% { transform: translateX(calc(-50% - 6px)); } 50% { transform: translateX(calc(-50% + 6px)); } 75% { transform: translateX(calc(-50% - 3px)); } }
+@media (max-width: 600px) { .live-pill { font-size: 13px; gap: 6px; } .live-pill .lp-meter { width: 30px; } }
+/* 練習の結果 */
+.pr-big { text-align: center; font-size: 48px; font-weight: 700; line-height: 1.1; margin: 4px 0; }
+.pr-big small { font-size: 20px; }
+.pr-row { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+.pr-row span { flex: 1; }
 
 #statusbar { height: 26px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 12px; font-size: 12.5px; color: var(--muted); background: var(--chrome); border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
 #status { overflow: hidden; text-overflow: ellipsis; }

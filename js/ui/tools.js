@@ -9,6 +9,9 @@ import { playbackSettings, renderWav } from '../audio/player.js';
 import { Synth } from '../audio/synth.js';
 import { exportMidi } from '../io/midifile.js';
 import { saveFile } from '../io/storage.js';
+import { STYLES, addAccompaniment, estimateChords, findRoles, collectChords } from '../core/accomp.js';
+import { addDir } from '../core/marks.js';
+import { MicInput } from '../audio/listen.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const INTERVALS = [
@@ -153,10 +156,163 @@ export class Tools {
   }
   stopRec() {
     const a = this.app;
+    if (a.live?.hum) return a.live.humStop(); // 鼻歌：マイクを止めて、残りの音を足してから書き込む
     document.body.classList.remove('recording');
     const n = this.rec.stop();
     a.updateUI();
     a.toast(n ? `${n} 音を書き込みました（クオンタイズ済み）` : '音が録音されませんでした', 2600);
+  }
+
+  // ───────── 鼻歌入力 ─────────
+  humDialog() {
+    const a = this.app;
+    if (a.live.hum) return a.live.humStop();
+    if (!MicInput.supported) return a.toast('このブラウザはマイクに対応していません', 3000);
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('kanade.hum') || '{}'); } catch (e) { /* なし */ }
+    const o = { mode: 'pitch', snap: true, octave: 'auto', grid: 4, triplets: false, countIn: 1, tempo: 85, playOthers: false, ...saved };
+    const loc = a.state.mode === 'input' ? a.state.caret : (a.selLoc() || { p: 0, s: 0, m: a.focusMeasure() });
+    const part = a.score.parts[loc.p];
+    const sel = (id, list, v) => `<select id="${id}">${list.map(([x, l]) => `<option value="${x}"${String(v) === String(x) ? ' selected' : ''}>${l}</option>`).join('')}</select>`;
+    this.dlg.open({
+      title: '🎤 鼻歌入力', narrow: true,
+      body: `<p style="margin:0 0 10px">${esc(part?.name || '')}・第${loc.m + 1}小節から。マイクに向かって「ふーん」「らー」と歌うと、楽譜になります。</p>
+        <div class="chips" id="huM" style="margin-bottom:6px"><button class="chip${o.mode === 'pitch' ? ' on' : ''}" data-m="pitch">高さだけ（1音ずつ）</button><button class="chip${o.mode === 'rhythm' ? ' on' : ''}" data-m="rhythm">リズムも（メトロノームに合わせて）</button></div>
+        <p id="huD" style="color:var(--muted);font-size:13px;margin:0 0 10px"></p>
+        <div class="row"><label class="field"><span>オクターブ</span>${sel('huO', [['auto', '自動（譜表に合わせる）'], [0, 'そのまま'], [12, '1オクターブ上'], [-12, '1オクターブ下']], o.octave)}</label></div>
+        <label class="ck"><input type="checkbox" id="huS"${o.snap ? ' checked' : ''}><span>調の音にそろえる（少し外れても、調に合う音にする）</span></label>
+        <div id="huR">
+          <div class="row"><label class="field"><span>細かさ</span>${sel('huG', [[2, '8分音符'], [4, '16分音符']], o.grid)}</label>
+          <label class="field"><span>カウントイン</span>${sel('huC', [[0, 'なし'], [1, '1小節'], [2, '2小節']], o.countIn)}</label></div>
+          <div class="row"><label class="field"><span>テンポ</span>${sel('huT', [50, 60, 75, 85, 100].map(n => [n, n + '%']), o.tempo)}</label></div>
+          <label class="ck"><input type="checkbox" id="huP"${o.playOthers ? ' checked' : ''}><span>ほかのパートを鳴らしながら（イヤホンのとき）</span></label>
+        </div>
+        <p style="color:var(--muted);font-size:13px;margin:8px 0 0">声は端末の中で処理するだけで、どこにも送りません。初めてのときはマイクの許可をたずねられます。■ か Esc で終わります。</p>`,
+      onOpen: (bd) => {
+        const q = (s) => bd.querySelector(s);
+        const show = () => {
+          const m = q('#huM .on').dataset.m;
+          q('#huR').hidden = m !== 'rhythm';
+          q('#huD').textContent = m === 'rhythm'
+            ? 'メトロノームに合わせて歌います。長さも聞き取って、16分音符などのマス目にそろえます。スピーカーの音をマイクが拾わないよう、イヤホンがおすすめです。'
+            : '1音ずつ歌って、声を止めると入ります。長さは今えらんでいる音価（数字キーで変えられます）。リズムを気にせず、ゆっくり歌えます。';
+        };
+        q('#huM').addEventListener('click', (e) => { const b = e.target.closest('[data-m]'); if (!b) return; bd.querySelectorAll('#huM .chip').forEach(c => c.classList.toggle('on', c === b)); show(); });
+        show();
+      },
+      buttons: [{ label: 'キャンセル' }, { label: '🎤 はじめる', cls: 'primary', onClick: (bd) => {
+        const q = (s) => bd.querySelector(s);
+        const oc = q('#huO').value;
+        const v = { mode: q('#huM .on').dataset.m, snap: q('#huS').checked, octave: oc === 'auto' ? 'auto' : +oc, grid: +q('#huG').value, triplets: false, countIn: +q('#huC').value, tempo: +q('#huT').value, playOthers: q('#huP').checked };
+        try { localStorage.setItem('kanade.hum', JSON.stringify(v)); } catch (e) { /* なし */ }
+        a.live.humStart(v);
+      } }],
+    });
+  }
+
+  // ───────── 演奏についてくる・練習モード ─────────
+  followDialog(strict = false) {
+    const a = this.app;
+    if (a.live.follow) return a.live.followStop();
+    const midiOk = !!(a.midiInfo?.ok && a.midiInfo.devices?.length);
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem('kanade.follow') || '{}'); } catch (e) { /* なし */ }
+    const parts = a.score.parts.map((p, i) => [i, p.name]).filter(([i]) => !a.score.parts[i].staves.some(st => st.clef === 'percussion'));
+    const kb = a.score.parts.findIndex(p => INST[p.inst]?.fam === '鍵盤');
+    const o = { source: 'midi', p: kb >= 0 ? kb : parts[0]?.[0] ?? 0, from: 'here', ...saved };
+    if (midiOk || strict) o.source = 'midi';
+    if (o.p != null && !a.score.parts[o.p]) o.p = 0;
+    const focus = a.focusMeasure();
+    this.dlg.open({
+      title: strict ? '🎯 練習モード' : '📖 演奏についてくる（譜めくり）', narrow: true,
+      body: `<p style="margin:0 0 10px">${strict
+        ? '次に弾く音が青くなります。<b>正しく弾くまで先に進みません</b>。間違えた音を数えて、最後に苦手な小節を教えます。'
+        : '弾いている場所を追いかけて、次に弾く音を青くし、ページの終わりで<b>自動でページをめくります</b>。弾きまちがえても、とばしても、ついてきます。'}</p>
+        <div class="row"><label class="field"><span>聞き取り</span><select id="foS"><option value="midi"${o.source === 'midi' ? ' selected' : ''}>MIDI キーボード・画面鍵盤${midiOk ? '（つながっています）' : ''}</option>${strict ? '' : `<option value="mic"${o.source === 'mic' ? ' selected' : ''}>マイク（ピアノ・歌・楽器の音）</option>`}</select></label>
+        <label class="field"><span>パート</span><select id="foP"><option value="all"${o.p == null ? ' selected' : ''}>全部のパート</option>${parts.map(([i, n]) => `<option value="${i}"${o.p === i ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></label></div>
+        <div class="row"><label class="field"><span>はじめる場所</span><select id="foF"><option value="here">第${focus + 1}小節から（選んでいる場所）</option><option value="top"${o.from === 'top' ? ' selected' : ''}>曲の頭から</option></select></label></div>
+        <p style="color:var(--muted);font-size:13px;margin:8px 0 0">${strict ? '' : 'マイクは音の成分で照らし合わせるので、MIDI より大まかです（静かな部屋がおすすめ）。音は端末の中で処理するだけで、どこにも送りません。'}テンポは自由です（止まっても待ちます）。■ か Esc で終わります。</p>`,
+      buttons: [{ label: 'キャンセル' }, { label: strict ? '🎯 はじめる' : '📖 はじめる', cls: 'primary', onClick: (bd) => {
+        const q = (s) => bd.querySelector(s);
+        const v = { source: q('#foS').value, p: q('#foP').value === 'all' ? null : +q('#foP').value, from: q('#foF').value };
+        try { localStorage.setItem('kanade.follow', JSON.stringify(v)); } catch (e) { /* なし */ }
+        a.live.followStart({ source: v.source, p: v.p, strict, from: v.from === 'top' ? 0 : focus });
+      } }],
+    });
+  }
+
+  // ───────── 伴奏の自動生成・コードの推定 ─────────
+  accRange() {
+    const a = this.app, s = a.state.sel;
+    return s?.kind === 'range' ? { m1: s.m1, m2: s.m2 } : { m1: 0, m2: a.score.measures.length - 1 };
+  }
+  accompany() {
+    const a = this.app;
+    const { m1, m2 } = this.accRange();
+    const roles = findRoles(a.score, m1, m2);
+    const nChords = collectChords(a.score).filter(c => c.m >= m1 && c.m <= m2).length;
+    const tgt = roles.target;
+    const where = tgt ? `${esc(a.score.parts[tgt.p].name)}の${tgt.rh == null ? '左手（下の段）' : '両手'}` : '新しく足すピアノのパート（両手）';
+    let style = 'arp';
+    try { style = localStorage.getItem('kanade.accStyle') || 'arp'; } catch (e) { /* なし */ }
+    if (!STYLES.some(s => s.id === style)) style = 'arp';
+    let previewing = false;
+    const stopPreview = () => { if (previewing) { previewing = false; a.player.stop(); } };
+    const opts = (bd) => ({ m1, m2, style: bd.querySelector('#acS .on').dataset.s, estimate: bd.querySelector('#acE').checked });
+    this.dlg.open({
+      title: '🎹 伴奏をつける', narrow: true,
+      body: `<p style="margin:0 0 10px">第${m1 + 1}〜${m2 + 1}小節のコードネームから、伴奏の音符を書きます。<br>書く場所：<b>${where}</b>（今ある音符は置き換わります。元に戻すで戻せます）</p>
+        <div class="chips" id="acS">${STYLES.map(s => `<button class="chip${s.id === style ? ' on' : ''}" data-s="${s.id}" title="${esc(s.desc)}">${esc(s.ja)}</button>`).join('')}</div>
+        <p id="acD" style="color:var(--muted);font-size:13px;margin:6px 0 10px"></p>
+        <label class="ck"><input type="checkbox" id="acE"${nChords ? '' : ' checked'}><span>コードネームがない小節は、メロディー（${esc(a.score.parts[roles.melody.p]?.name || '')}）から推定して書き込む</span></label>
+        <p style="color:var(--muted);font-size:13px;margin:6px 0 0">この範囲のコードネーム：${nChords ? nChords + '個' : 'まだありません'}。「試聴」で書き込む前に聞けます。</p>`,
+      onOpen: (bd) => {
+        const show = () => { const s = STYLES.find(x => x.id === bd.querySelector('#acS .on').dataset.s); bd.querySelector('#acD').textContent = s.desc; };
+        bd.querySelector('#acS').addEventListener('click', (e) => { const b = e.target.closest('[data-s]'); if (!b) return; bd.querySelectorAll('#acS .chip').forEach(c => c.classList.toggle('on', c === b)); show(); stopPreview(); });
+        show();
+      },
+      onClose: stopPreview,
+      buttons: [{ label: 'キャンセル' }, { label: '▶ 試聴', onClick: (bd) => {
+        if (previewing) { stopPreview(); return false; }
+        const copy = JSON.parse(JSON.stringify(a.score));
+        const r = addAccompaniment(copy, opts(bd));
+        if (!r.ok) { a.toast('コードネームがありません。「推定して書き込む」をオンにするか、コードネームを入れてください', 3500); return false; }
+        a.synth.ensure();
+        previewing = true;
+        a.player.start(copy, m1, { tempoScale: a.speed || 1 });
+        return false;
+      } }, { label: '書き込む', cls: 'primary', onClick: (bd) => {
+        const o = opts(bd);
+        try { localStorage.setItem('kanade.accStyle', o.style); } catch (e) { /* なし */ }
+        stopPreview();
+        let r;
+        a.edit('伴奏をつける', () => { r = addAccompaniment(a.score, o); if (!r.ok) return false; });
+        if (!r?.ok) { a.toast('コードネームがありません。「推定して書き込む」をオンにするか、コードネームを入れてください', 3500); return false; }
+        const st = STYLES.find(s => s.id === o.style);
+        a.toast(`伴奏（${st.ja}）を${r.measures}小節に書きました${r.added.length ? `。コードも推定しました：${r.added.slice(0, 6).map(c => c.text).join(' ')}${r.added.length > 6 ? ' …' : ''}` : ''}`, 4000);
+      } }],
+    });
+  }
+  // コードネームだけ推定して書き込む（伴奏は書かない）
+  guessChords() {
+    const a = this.app;
+    const { m1, m2 } = this.accRange();
+    const roles = findRoles(a.score, m1, m2);
+    const have = new Set(collectChords(a.score).map(c => c.m));
+    const added = [];
+    let minor = false;
+    a.edit('コードを推定', () => {
+      const r = estimateChords(a.score, { ...roles.melody, m1, m2 });
+      minor = r.minor;
+      let prev = null;
+      for (const c of r.chords) {
+        if (have.has(c.m)) { prev = null; continue; }
+        if (c.text !== prev) { addDir(a.score, roles.melody.p, roles.melody.s, c.m, { t: 0, k: 'chord', text: c.text }); added.push(c.text); }
+        prev = c.text;
+      }
+      if (!added.length) return false;
+    });
+    a.toast(added.length ? `${minor ? '短調' : '長調'}として推定しました：${added.slice(0, 8).join(' ')}${added.length > 8 ? ' …' : ''}` : 'コードネームのない小節がありません', 3500);
   }
 
   // ───────── 再生の設定・ミキサー ─────────

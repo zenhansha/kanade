@@ -240,7 +240,7 @@ export function buildPerformance(score, opts = {}) {
                 const gd = Math.min(0.075, (end - start) / 3);
                 ev.grace.forEach((gr, gi) => gr.notes.forEach(n => notes.push({
                   ...base, start: Math.max(0, start - (ev.grace.length - gi) * gd), end: Math.max(0, start - (ev.grace.length - gi - 1) * gd) - 0.005,
-                  midi: midiOf(n) + oct + shift, vel: vel * 0.85,
+                  midi: midiOf(n) + oct + shift, vel: vel * 0.85, grace: true,
                 })));
               }
               const orn = art.includes('tr') || inSpan(trills, at) ? 'tr' : ['mord', 'prall', 'turn', 'invTurn', 'turnSlash', 'haydn', 'trembl'].find(k => art.includes(k)) || null;
@@ -481,7 +481,11 @@ export class Player {
     const frame = () => {
       if (!this.playing) return;
       const pos = this.position();
-      if (loopEnd != null && pos >= loopEnd - 0.01) { const o = { ...opts }; this.stop(true); this.start(score, opts.loop.m1, { ...o, countIn: 0 }); return; }
+      if (loopEnd != null && pos >= loopEnd - 0.01) {
+        const o = { ...opts };
+        if (opts.onLoop) o.tempoScale = opts.onLoop(o.tempoScale || 1) ?? o.tempoScale; // だんだん速く
+        this.stop(true); this.start(score, opts.loop.m1, { ...o, countIn: 0 }); return;
+      }
       if (pos > perf.total + 0.3 && !opts.keepGoing) { this.stop(); return; }
       if (this.onTick && pos >= fromSec) this.onTick(perf.secToPos(Math.min(pos, perf.total - 1e-6)), pos);
       this.raf = requestAnimationFrame(frame);

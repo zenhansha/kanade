@@ -58,7 +58,8 @@ export class Piano {
       const st = this.app.state;
       const rec = this.app.tools?.rec;
       const heard = this.app.liveOn(midi, 90); // 何より先に鳴らす
-      if (rec?.active) rec.noteOn(midi, 90, e.timeStamp);
+      if (this.app.live?.follow) this.app.live.followNote(midi, e.timeStamp);
+      else if (rec?.active) { if (!rec.o?.hum) rec.noteOn(midi, 90, e.timeStamp); }
       else if (st.mode === 'input') {
         const fifths = this.app.L.attrs[st.caret.m]?.fifths || 0;
         this.app.enterPitch(spellMidi(midi, fifths), { chord, quiet: heard });

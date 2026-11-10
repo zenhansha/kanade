@@ -79,6 +79,13 @@ export class Recorder {
       } catch (e) { console.warn('途中経過の表示に失敗', e); }
     }, Math.max(100, (this.app.layoutMs || 0) * 5));
   }
+  // 鼻歌：区切れた音（時刻は performance.now() の ms、f は高さの小数）を足す。高さは止めるときに o.mapNotes でまとめて決める
+  addHum(aStamp, bStamp, f, vel = 80) {
+    if (!this.active) return;
+    const a = this.secAt(aStamp);
+    this.notes.push({ a, b: Math.max(a + 0.03, this.secAt(bStamp)), midi: Math.round(f), f, vel });
+    this.scheduleShow();
+  }
   // いまの位置（小節）：画面の表示用
   where() { const p = this.perf.secToPos(Math.max(0, this.app.player.position())); return p.m; }
 
@@ -110,7 +117,8 @@ export class Recorder {
       const pos = perf.secToPos(sec);
       return A[pos.m].start + pos.t;
     };
-    return this.notes.map(n => ({ start: toTick(n.a), end: toTick(n.b), midi: n.midi, vel: n.vel })).filter(n => n.end > n.start);
+    const src = o.mapNotes ? o.mapNotes(this.notes) : this.notes;
+    return src.map(n => ({ start: toTick(n.a), end: toTick(n.b), midi: n.midi, vel: n.vel })).filter(n => n.end > n.start);
   }
 
   // 楽譜に書き込む（クオンタイズ → 右手・左手 → 声部）

@@ -13,8 +13,10 @@ export class Dialogs {
   constructor(app) { this.app = app; this.root = document.getElementById('modalRoot'); }
 
   // ── 汎用 ──
-  open({ title, body, buttons = [], narrow = false, onOpen }) {
+  // onClose：閉じたとき（どの閉じ方でも）に呼ぶ
+  open({ title, body, buttons = [], narrow = false, onOpen, onClose }) {
     this.close();
+    this.onCloseFn = onClose || null;
     const bd = document.createElement('div');
     bd.className = 'backdrop';
     bd.innerHTML = `<div class="dialog${narrow ? ' narrow' : ''}" role="dialog"><header>${title}</header><div class="body">${body}</div>${buttons.length ? '<footer></footer>' : ''}</div>`;
@@ -31,7 +33,12 @@ export class Dialogs {
     if (onOpen) onOpen(bd);
     return bd;
   }
-  close() { this.root.innerHTML = ''; this.closeMenu(); }
+  close() {
+    const f = this.onCloseFn;
+    this.onCloseFn = null;
+    this.root.innerHTML = ''; this.closeMenu();
+    if (f) f();
+  }
   menu(anchor, items) {
     this.closeMenu();
     const m = document.createElement('div');
@@ -604,6 +611,11 @@ export class Dialogs {
         <p>・ピアノは強さごとに録音した音源で鳴ります（初回だけ読み込みます）。「再生」タブの<b>響き</b>で、ホール・部屋・なしを選べます。<br>
         ・テンポの画面の<b>タップ</b>で、拍に合わせてたたいてテンポを決められます（T キーでも）。<br>
         ・ピアノの音：Salamander Grand Piano（作者 Alexander Holm、CC BY 3.0）。</p>
+        <h3>歌う・弾く・伴奏</h3>
+        <p>・<b>鼻歌入力</b>（「ホーム」か「再生」タブ）：マイクに向かって歌うと楽譜になります。「高さだけ」は1音ずつ（長さは今の音価）、「リズムも」はメトロノームに合わせて歌います。声は端末の中で処理するだけです。<br>
+        ・<b>ついてくる</b>（「再生」タブ）：MIDI キーボードかマイクで弾くと、弾いている場所を追いかけて次に弾く音を青くし、ページの終わりで自動でめくります。<br>
+        ・<b>練習モード</b>：正しく弾くまで進みません。終わると、間違いの多かった小節を「ゆっくり聞く」「もう一度弾く」で練習できます。<b>だんだん速く</b>をオンにすると、ループ再生のたびに 5% ずつ速くなります。<br>
+        ・<b>伴奏をつける</b>（「ツール」タブ）：コードネームから、ピアノの伴奏（シンプル・アルペジオ・バラード・ズンチャッ・ボサノバ・8ビート）を書きます。コードネームがなければメロディーから推定します（<b>コードを推定</b>だけもできます）。</p>
         <h3>PC（マウス）で使うとき</h3>
         <p>・<b>ドラッグ</b>で小節の範囲選択、<b>右クリック</b>でその場のメニュー（コピー・移調・拍子や調の変更など）、<b>ダブルクリック</b>でそこから入力。<br>
         ・<b>Ctrl+ホイール</b>で拡大縮小、<b>Ctrl+0</b> で画面に合わせる（大きな画面ではページを横に並べます）。<br>

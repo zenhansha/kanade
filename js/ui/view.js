@@ -342,6 +342,55 @@ export class ScoreView {
     return { page: sy.page, x, y: sy.staffYs[0] };
   }
 
+  // 演奏についてくる：次に弾く場所の線（再生の線とは別の色）
+  showFollowLine(m, t) {
+    const L = this.L;
+    if (!L || !L.measures[m]) return this.hideOverlay('follow');
+    const mg = L.measures[m], sy = L.systems[mg.sys], sp = this.spPx;
+    const el = this.overlay('follow', sy.page, 'playline followline');
+    el.style.left = tickToX(mg, t) * sp + 'px';
+    el.style.top = (sy.staffYs[0] - 2) * sp + 'px';
+    el.style.height = (sy.staffYs[sy.staffYs.length - 1] - sy.staffYs[0] + 8) * sp + 'px';
+  }
+
+  // 演奏についてくる：ページめくり。今の段と次の段がどちらも見えるようにスクロールする。
+  //   ・ページ全体が画面に入るなら、ページの頭にそろえる（紙の楽譜と同じ見え方）
+  //   ・ページの最後の段の後半に来たら、次の段（次のページ）も見せる（半ページめくり：今の段は見えたまま）
+  //   ・1段スクロールの表示では、今の位置が左から 1/4 くらいに来るように横へ送る
+  followTo(m, t) {
+    const L = this.L, mg = L?.measures[m];
+    if (!mg) return;
+    const sc = this.scroller, sp = this.spPx, sr = sc.getBoundingClientRect();
+    const sysK = mg.sys, sy = L.systems[sysK];
+    const pageBox = (pg) => { const w = this.wraps[pg]; if (!w) return null; const r = w.getBoundingClientRect(); return { l: r.left - sr.left + sc.scrollLeft, t: r.top - sr.top + sc.scrollTop, w: r.width, h: r.height }; };
+    const sysBox = (k) => { const s = L.systems[k], P = pageBox(s.page); return { l: P.l + s.x0 * sp, t: P.t + (s.top - 1) * sp, r: P.l + s.x1 * sp, b: P.t + (s.bottom + 1) * sp, page: s.page }; };
+    const vw = sc.clientWidth, vh = sc.clientHeight;
+    const view = { l: sc.scrollLeft, t: sc.scrollTop, r: sc.scrollLeft + vw, b: sc.scrollTop + vh };
+    const inside = (b) => b.l >= view.l - 2 && b.r <= view.r + 2 && b.t >= view.t - 2 && b.b <= view.b + 2;
+    let left = view.l, top = view.t;
+    if (this.app.viewOpts.arrange === 'scroll') {
+      const P = pageBox(sy.page), x = P.l + tickToX(mg, t) * sp;
+      if (x < view.l + vw * 0.1 || x > view.l + vw * 0.7) left = x - vw * 0.25;
+      const cb = sysBox(sysK);
+      if (cb.t < view.t || cb.b > view.b) top = cb.t - 8;
+    } else {
+      const cur = sysBox(sysK);
+      const x = tickToX(mg, t), frac = (x - sy.contentX) / Math.max(1, sy.x1 - sy.contentX);
+      const nxt = L.systems[sysK + 1] && (L.systems[sysK + 1].page === sy.page || frac > 0.5) ? sysBox(sysK + 1) : null;
+      if (inside(cur) && (!nxt || inside(nxt))) return;
+      const u = nxt ? { l: Math.min(cur.l, nxt.l), t: Math.min(cur.t, nxt.t), r: Math.max(cur.r, nxt.r), b: Math.max(cur.b, nxt.b) } : cur;
+      const P = pageBox(sy.page);
+      if (P.w <= vw + 2 && P.h <= vh + 2 && (!nxt || nxt.page === sy.page)) { left = P.l - 8; top = P.t - 8; }
+      else if (u.r - u.l <= vw && u.b - u.t <= vh) {
+        // 2つの段が入る：今の段の頭（横に並べたときはページの左端）にそろえる
+        left = u.r > view.r || u.l < view.l ? Math.min(cur.l, nxt?.l ?? cur.l) - 8 : view.l;
+        top = u.b > view.b || u.t < view.t ? u.t - 8 : view.t;
+      } else { left = cur.r > view.r || cur.l < view.l ? cur.l - 8 : view.l; top = cur.t - 8; }
+    }
+    left = Math.max(0, left); top = Math.max(0, top);
+    if (Math.abs(left - sc.scrollLeft) > 2 || Math.abs(top - sc.scrollTop) > 2) sc.scrollTo({ left, top, behavior: 'smooth' });
+  }
+
   // マウスを乗せた音符をうっすら色付け（PC 用。クリックで選べることが分かるように）
   hover(id) {
     if (id === this.hoverId) return;

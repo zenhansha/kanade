@@ -22,6 +22,7 @@ import { readMxl } from './io/mxl.js';
 import { SMUFL } from './smufl.js';
 import * as P from './core/perc.js';
 import { Tools } from './ui/tools.js';
+import { Live } from './ui/live.js';
 import { importMidi } from './io/midifile.js';
 
 const G = SMUFL.glyphs;
@@ -48,6 +49,7 @@ export class App {
     this.viewOpts = { part: null, transposed: tr, multiRest: true, rangeCheck: false, arrange };
     this.theme = theme;
     this.speed = 1;      // 再生の速さ（リボンの「再生」タブ）
+    this.rampLoop = false; // ループのたびに少しずつ速くする（練習用）
     this.loop = null;    // ループ再生の範囲 { m1, m2 }
     this.transient = false; // まだ何も書いていない仮の楽譜（ホーム画面の後ろ）。編集すると保存されるようになる
     this.textEd = null; // 歌詞・コードネームの入力中
@@ -70,6 +72,7 @@ export class App {
     this.piano = new Piano(this, document.getElementById('piano'));
     this.dialogs = new Dialogs(this);
     this.tools = new Tools(this);
+    this.live = new Live(this);
     this.ribbon = new Ribbon(this);
     bindKeys(this);
     this.bindTopbar();
@@ -1071,6 +1074,7 @@ export class App {
   }
   escape() {
     const st = this.state;
+    if (this.live?.active) return this.live.stop();
     if (this.tools.rec.active) return this.tools.stopRec();
     if (st.mode === 'input') this.setMode('select');
     else { st.sel = null; this.refreshOverlays(); this.updateUI(); }
@@ -1103,6 +1107,7 @@ export class App {
 
   // ───────── 再生 ─────────
   async togglePlay() {
+    if (this.live?.active) return this.live.stop();
     if (this.tools.rec.active) return this.tools.stopRec();
     if (this.player.playing) { this.player.stop(); this.updateUI(); return; }
     this.synth.ensure();
@@ -1111,8 +1116,30 @@ export class App {
     this.followPlay = true;
     document.getElementById('btnPlay').classList.add('on');
     const pb = this.score.settings.playback || {};
-    await this.player.start(this.score, from, { click: !!pb.click, countIn: pb.click ? pb.countIn || 0 : 0, loop: this.loop || null, tempoScale: this.speed || 1 });
+    const onLoop = this.loop && this.rampLoop ? () => {
+      // くり返すたびに 5% ずつ速く（100% まで）
+      this.setSpeed(Math.min(this.rampTo || 1, Math.round((this.speed + 0.05) * 100) / 100));
+      this.toast(`速さ ${Math.round(this.speed * 100)}%`, 1000);
+      return this.speed;
+    } : null;
+    await this.player.start(this.score, from, { click: !!pb.click, countIn: pb.click ? pb.countIn || 0 : 0, loop: this.loop || null, tempoScale: this.speed || 1, onLoop });
     this.updateUI();
+  }
+  setSpeed(v) {
+    this.speed = v;
+    const s = document.getElementById('rbSpeed'), l = document.getElementById('rbSpeedL');
+    if (s) s.value = Math.round(v * 100);
+    if (l) l.textContent = Math.round(v * 100) + '%';
+    this.updateUI();
+  }
+  // 苦手な小節を、ゆっくり（70%）からくり返し聞く。くり返すたびに少しずつ速くなる
+  listenSlowly(m1, m2 = m1) {
+    if (this.player.playing) this.player.stop(true);
+    this.loop = { m1, m2 };
+    this.rampLoop = true;
+    this.setSpeed(0.7);
+    this.toast(`第${m1 + 1}${m2 > m1 ? '〜' + (m2 + 1) : ''}小節を 70% からくり返します（スペースで止める）`, 3000);
+    this.togglePlay();
   }
   rewind() {
     if (this.player.playing) this.player.stop();
@@ -1127,7 +1154,8 @@ export class App {
     btn.classList.add('flash'); setTimeout(() => btn.classList.remove('flash'), 120);
     const st = this.state;
     const heard = this.liveOn(note, vel); // 何より先に鳴らす
-    if (this.tools.rec.active) { this.tools.rec.noteOn(note, vel, stamp); return; }
+    if (this.live?.follow) { this.live.followNote(note, stamp); return; }
+    if (this.tools.rec.active) { if (!this.tools.rec.o?.hum) this.tools.rec.noteOn(note, vel, stamp); return; }
     const cst = this.score.parts[st.caret.p]?.staves[st.caret.s];
     if (st.mode === 'input' && cst?.clef === 'percussion') return this.enterPitch(P.drumPitch(P.drumForGm(note)), { chord: chordHeld });
     if (st.mode !== 'input') return; // 選択モードでは音を鳴らすだけ（試し弾き）
